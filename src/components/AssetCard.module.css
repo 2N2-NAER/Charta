@@ -1,0 +1,73 @@
+.card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+  margin-bottom: 2px;
+}
+
+.card:hover {
+  background: var(--color-bg-hover);
+}
+
+.cardSelected {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.cardSelected:hover {
+  background: var(--color-accent-hover);
+}
+
+.icon {
+  font-size: 16px;
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+}
+
+.info {
+  flex: 1;
+  min-width: 0;
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 500;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.lockIcon {
+  font-size: 11px;
+}
+
+/* ===== 状态圆点 ===== */
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dotPending { background: var(--color-status-pending); }
+.dotGenerated { background: var(--color-status-generated); }
+.dotApproved { background: var(--color-status-approved); }
+.dotModified { background: var(--color-status-modified); }
+.dotLocked { background: var(--color-status-locked); }

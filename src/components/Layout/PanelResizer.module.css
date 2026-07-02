@@ -1,0 +1,23 @@
+.resizer {
+  width: var(--divider-width);
+  cursor: col-resize;
+  background: var(--color-bg-tertiary);
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.resizer:hover,
+.resizerActive {
+  background: var(--color-accent);
+}
+
+.resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}

@@ -1,0 +1,219 @@
+// ===== Tool 注册表 =====
+
+/** Tool 身份卡（取代 v3 的 AgentSpec） */
+export interface ToolSpec {
+  /** 唯一标识符，作为 Function Calling 的 function.name */
+  id: string
+
+  /** 人类可读名称（前端展示用） */
+  name: string
+
+  /**
+   * Tool 描述（最关键字段）
+   * 直接作为 function.description 传给 LLM，
+   * LLM 据此决定是否调用此 Tool。
+   */
+  description: string
+
+  /** Subagent System Prompt 文件路径（src/llm/prompts/ 下的 .md 文件） */
+  systemPromptFile: string
+
+  /**
+   * 上下文隔离边界
+   * 执行此 Tool 时，只读取这些文件注入上下文。
+   */
+  reads: string[]
+
+  /** Tool 执行后写入的文件列表 */
+  writes: string[]
+
+  /** 输出校验 TAG 列表（<<<TAG_START>>> / <<<TAG_END>>>） */
+  outputTags: string[]
+
+  /** 前端分组展示标签（如 '基础设定'、'大纲结构'、'微观精铸'） */
+  group: string
+
+  /**
+   * 可选：依赖文件列表
+   * 如果指定，Tool 在这些文件存在前不可调用。
+   */
+  dependsOn?: string[]
+}
+
+// ===== 资产文件状态 =====
+
+/** 卡片状态（简化 3 态，v4 取消了 approved/locked） */
+export type AssetStatus = 'pending' | 'generated' | 'modified'
+
+// ===== 资产文件信息 =====
+
+/** 资产文件元信息（v4 去掉了 stage/agentId） */
+export interface AssetFileInfo {
+  path: string
+  filename: string
+  group: string
+  exists: boolean
+}
+
+/** 前端卡片展示数据（v4 去掉了 stage/isLocked） */
+export interface AssetCardData {
+  path: string
+  filename: string
+  group: string
+  status: AssetStatus
+}
+
+// ===== 文件条目 =====
+
+/** 文件内容条目 */
+export interface FileEntry {
+  path: string
+  content: string
+}
+
+// ===== 对话消息 =====
+
+/** 对话消息（v4 去掉了 agent 角色和 agentId） */
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'system'
+  content: string
+  timestamp: number
+}
+
+// ===== 调度相关类型 =====
+
+/** 单次 Tool 执行结果 */
+export interface ToolResult {
+  /** 是否执行成功 */
+  success: boolean
+
+  /** 写入的文件列表（成功时） */
+  writes?: string[]
+
+  /** 错误信息（失败时） */
+  error?: string
+
+  /** Tool 输出内容 */
+  output?: string
+}
+
+/** 调度引擎的运行时状态 */
+export interface SchedulerState {
+  /** 当前调度轮次（最多 5 轮） */
+  currentRound: number
+
+  /** 最大允许轮次 */
+  maxRounds: number
+
+  /** 已调用的 Tool ID 列表 */
+  toolsCalled: string[]
+
+  /** 已执行的 Tool 结果 */
+  toolResults: ToolResult[]
+
+  /** 当前审计轮次（v5 新增，上限 3） */
+  auditRound: number
+
+  /** 最大审计轮次（固定 3） */
+  maxAuditRounds: number
+}
+
+/** 一次 processUserInput 的整体结果 */
+export interface DispatchResult {
+  /** 整体调度是否成功 */
+  success: boolean
+
+  /** 每个 Tool 的执行结果 */
+  results: ToolResult[]
+
+  /** 最终回复消息 */
+  response: string
+}
+
+// ===== 执行事件（实时日志） =====
+
+/** 执行事件类型 */
+export type ExecutionEventType =
+  | 'orchestrator_thinking'
+  | 'tool_start'
+  | 'tool_retry'
+  | 'tool_complete'
+  | 'tool_error'
+  | 'engine_complete'
+  | 'engine_error'
+
+/** 执行事件（实时日志条目） */
+export interface ExecutionEvent {
+  /** 事件类型 */
+  type: ExecutionEventType
+
+  /** 发生时间戳 */
+  timestamp: number
+
+  /** 当前调度轮次 */
+  round?: number
+
+  /** 最大调度轮次 */
+  maxRounds?: number
+
+  /** 工具 ID */
+  toolId?: string
+
+  /** 工具名称（展示用） */
+  toolName?: string
+
+  /** 当前重试次数 */
+  attempt?: number
+
+  /** 最大重试次数 */
+  maxAttempts?: number
+
+  /** 人类可读的中文描述 */
+  message: string
+}
+
+/** 执行事件回调 */
+export type ExecutionEventCallback = (event: ExecutionEvent) => void
+
+// ===== Diff =====
+
+/** Diff 片段 */
+export interface DiffPart {
+  value: string
+  added?: boolean
+  removed?: boolean
+}
+
+// ===== 校验 =====
+
+/** 输出校验结果 */
+export interface ValidationResult {
+  valid: boolean
+  missingTags: string[]
+  extracted: Record<string, string>
+}
+
+// ===== IPC 接口（Phase 1b Electron，保留但简化） =====
+
+/** 导入结果 */
+export interface ImportResult {
+  content: string
+  filename: string
+  format: 'md' | 'docx' | 'xlsx'
+}
+
+/** Electron Preload 暴露的 API（Phase 1b） */
+export interface StoryAPI {
+  readFile(filename: string): Promise<string>
+  writeFile(filename: string, content: string): Promise<void>
+  listAssetFiles(): Promise<AssetFileInfo[]>
+  importFile(filePath: string): Promise<ImportResult>
+}
+
+/** 声明 window.storyAPI（Phase 1b） */
+declare global {
+  interface Window {
+    storyAPI?: StoryAPI
+  }
+}

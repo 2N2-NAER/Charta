@@ -1,0 +1,137 @@
+/* ===== Diff 高亮样式 ===== */
+
+.diff-add {
+  background-color: var(--color-diff-add);
+  text-decoration: none;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.diff-remove {
+  background-color: var(--color-diff-remove);
+  text-decoration: line-through;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* ===== Markdown 内容渲染 ===== */
+
+.markdown-body h1 {
+  font-size: 20px;
+  margin: 16px 0 12px;
+  color: var(--color-text-primary);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-bg-tertiary);
+}
+
+.markdown-body h2 {
+  font-size: 16px;
+  margin: 14px 0 10px;
+  color: var(--color-text-primary);
+}
+
+.markdown-body h3 {
+  font-size: 14px;
+  margin: 12px 0 8px;
+  color: var(--color-text-secondary);
+}
+
+.markdown-body p {
+  margin: 6px 0;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 12px;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--color-bg-tertiary);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: var(--color-bg-tertiary);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.markdown-body td {
+  color: var(--color-text-secondary);
+}
+
+.markdown-body tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.markdown-body code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--color-bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.markdown-body pre {
+  background: var(--color-bg-tertiary);
+  padding: 12px 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--color-accent);
+  padding-left: 12px;
+  color: var(--color-text-muted);
+  margin: 8px 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 20px;
+  margin: 6px 0;
+}
+
+.markdown-body li {
+  margin: 2px 0;
+}
+
+/* ===== 状态指示器 ===== */
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot--pending { background: var(--color-status-pending); }
+.status-dot--generated { background: var(--color-status-generated); }
+.status-dot--approved { background: var(--color-status-approved); }
+.status-dot--modified { background: var(--color-status-modified); }
+.status-dot--locked { background: var(--color-status-locked); }
+
+/* ===== 加载骨架 ===== */
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-bg-tertiary) 25%,
+    var(--color-bg-hover) 50%,
+    var(--color-bg-tertiary) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
+
+@keyframes skeleton-loading {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

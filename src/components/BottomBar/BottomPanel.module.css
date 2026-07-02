@@ -1,0 +1,18 @@
+.panel {
+  height: var(--bottom-panel-height);
+  min-height: var(--bottom-panel-height);
+  border-top: 1px solid var(--color-bg-tertiary);
+  background: var(--color-bg-secondary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.controlsRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-bg-tertiary);
+  flex-shrink: 0;
+}
