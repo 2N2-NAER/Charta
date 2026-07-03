@@ -16,9 +16,9 @@ const promptModules = import.meta.glob<{ default: string }>(
 
 // ===== 常量 =====
 
-const MAX_ROUNDS = 5
+const MAX_ROUNDS = 10
 const MAX_RETRIES = 3
-const MAX_TOOLS_PER_ROUND = 3
+const MAX_TOOLS_PER_ROUND = 5
 const CONTEXT_LIMIT_CHARS = 22_000 // deepseek-v4-flash 32K 的 ~70%
 
 
@@ -91,15 +91,16 @@ function compressMessages(messages: ChatCompletionMessageParam[]): ChatCompletio
 // ===== OrchestratorEngine =====
 
 /**
- * Orchestrator 调度引擎（v4）
+ * Orchestrator 调度引擎（v5）
  *
  * 核心方法：processUserInput()
  *   → 注入可用工具到 System Prompt
- *   → 进入 5 轮 FC 循环
- *     → LLM 返回 tool_calls → 串行执行 Tool
+ *   → 进入 FC 循环（最多 10 轮）
+ *     → LLM 返回 tool_calls → 串行执行 Tool（最多 5 个/轮）
  *     → 写入文件 → 继续循环
  *     → LLM 返回 stop → 输出给用户
- *   → 超 5 轮 → 强制结束
+ *   → 超限 → 强制结束
+ *   → audit 循环（story_checker 最多 3 轮）与 FC 循环独立计数
  *
  * @see product_design_v4/orchestrator调度引擎设计.md
  */
@@ -203,7 +204,7 @@ export class OrchestratorEngine {
    * @returns DispatchResult
    */
   async processUserInput(userInput: string, onEvent?: ExecutionEventCallback): Promise<DispatchResult> {
-    // ① 计算可用工具（v5：全部工具始终可见，不再按 dependsOn 过滤）
+    // ① 计算可用工具（v5：全部工具始终可见）
     this.onEvent = onEvent
     const availableTools = getAvailableTools()
     const toolSpecs = availableTools.map(buildFunctionSpec)
@@ -226,16 +227,8 @@ export class OrchestratorEngine {
       maxAuditRounds: 3,
     }
 
-    // ⑤ FC 调度循环
-    while (state.currentRound < MAX_ROUNDS) {
-      // 审计超限检查：story_checker 最多执行 3 轮
-      if (state.auditRound >= state.maxAuditRounds) {
-        return {
-          success: true,
-          results: state.toolResults,
-          response: '检查和修复已达 3 轮上限，部分问题可能需要你的进一步指导。',
-        }
-      }
+    // ⑤ FC 调度循环 + 审计循环（独立计数）
+    while (state.currentRound < MAX_ROUNDS && state.auditRound < state.maxAuditRounds) {
 
       // 上下文管理：检查 token 是否超限
       if (estimateTokens(messages) > CONTEXT_LIMIT_CHARS) {
@@ -400,14 +393,18 @@ export class OrchestratorEngine {
       }
     }
 
-    // 超过 5 轮 → 强制结束
+    // 超过轮次上限 → 强制结束
+    const auditMsg = state.auditRound >= state.maxAuditRounds
+      ? '检查和修复已达 3 轮上限，部分问题可能需要你的进一步指导。'
+      : `已执行 ${state.toolsCalled.length} 个工具（达 ${MAX_ROUNDS} 轮上限），请继续补充剩余需求。`
+
     this.emit('engine_complete', {
-      message: `已达到 ${MAX_ROUNDS} 轮上限，已执行 ${state.toolsCalled.length} 个工具`,
+      message: auditMsg,
     })
     return {
-      success: false,
+      success: true,
       results: state.toolResults,
-      response: '需求过于复杂，请分批提交',
+      response: auditMsg,
     }
   }
 }

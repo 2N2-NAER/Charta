@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { DiffViewer } from '../DiffViewer'
 import styles from './CurrentPanel.module.css'
 
@@ -50,9 +52,9 @@ export function CurrentPanel({
           />
         ) : content ? (
           <div className="markdown-body">
-            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0 }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {content}
-            </pre>
+            </ReactMarkdown>
           </div>
         ) : (
           <div className={styles.empty}>选择资产卡片查看内容</div>

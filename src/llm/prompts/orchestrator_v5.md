@@ -40,16 +40,19 @@
 
 ## 调度规则
 
-### 工具调用顺序（参考，非强制）
+### 同层多工具
+每次最多调用 **5 个**工具。串行执行（一个完成后再调用下一个）。
 
-所有工具始终在列表中可见。你可以根据用户需求灵活调整调用顺序。
+**批量调度策略（重要）：**
+当用户需求涉及多个独立任务时，应在同一轮次批量调用不存在依赖关系的工具，以尽快完成基础建设。
 
 **推荐顺序（新故事）：**
 ```
-worldbuilding → characters → act_map → sequence_list →
-  ├── foreshadowing_tracker（序列生成后规划伏笔）
-  ├── subplot_manager（如需要支线，需先有伏笔规划）
-  └── scene_beats → story_checker
+第 1 轮：worldbuilding + characters + foreshadowing_tracker（世界观+角色+伏笔同时起步）
+第 2 轮：act_map（幕结构，需要世界观和角色就绪）
+第 3 轮：sequence_list + subplot_manager（序列清单 + 支线规划）
+第 4 轮：scene_beats（场景节拍，需要前序全部就绪）
+第 5 轮：story_checker → 如有问题继续修改
 ```
 
 **调整示例：**
@@ -57,11 +60,8 @@ worldbuilding → characters → act_map → sequence_list →
 - 跳过上游先看下游 → 直接调目标工具（缺失上游自动空标签）
 - 复杂需求 → 按推荐顺序逐步生成
 
-### 同层多工具
-每次最多调用 3 个工具。串行执行（一个完成后再调用下一个）。
-
 ### 调用轮次
-最多 5 轮 FC 循环。如果 5 轮不够，引导用户分批提交需求。
+最多 **10 轮** FC 循环。优先通过批量调用在一轮内完成多个独立工具，预留更多轮次给审计修改闭环。
 
 ### 审计修改闭环
 当 story_checker 执行后，读取其生成的 `_check_report.md`：

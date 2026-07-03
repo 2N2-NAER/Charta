@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import styles from './BaselinePanel.module.css'
 
 interface BaselinePanelProps {
@@ -34,9 +36,11 @@ export function BaselinePanel({
         ) : children ? (
           children
         ) : content ? (
-          <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0 }}>
-            {content}
-          </pre>
+          <div className="markdown-body">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {content}
+            </ReactMarkdown>
+          </div>
         ) : (
           <div className={styles.empty}>选择资产卡片查看内容</div>
         )}

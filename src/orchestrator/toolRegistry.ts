@@ -8,7 +8,6 @@ type ChatCompletionTool = OpenAI.Chat.Completions.ChatCompletionTool
  *
  * v5 变更：
  * - gen/refine 合并为单一 Tool（自身文件在 reads 中 → 空则创建，有则修改）
- * - 拆除 dependsOn 硬闸门，所有 Tool 始终在 FC 列表中可见
  * - 新增 foreshadowing_tracker / subplot_manager / story_checker
  * - 移除 plot_synopsis（职能被 act_map 吸收）
  */
@@ -33,7 +32,6 @@ export const TOOL_REGISTRY: ToolSpec[] = [
     writes: ['characters.md'],
     outputTags: ['<<<CHARACTERS_START>>>', '<<<CHARACTERS_END>>>'],
     group: '基础设定',
-    dependsOn: ['worldbuilding.md'],
   },
 
   // ===== 大纲结构 =====
@@ -46,7 +44,6 @@ export const TOOL_REGISTRY: ToolSpec[] = [
     writes: ['act_map.md'],
     outputTags: ['<<<ACT_MAP_START>>>', '<<<ACT_MAP_END>>>'],
     group: '大纲结构',
-    dependsOn: ['worldbuilding.md', 'characters.md'],
   },
   {
     id: 'sequence_list',
@@ -57,7 +54,6 @@ export const TOOL_REGISTRY: ToolSpec[] = [
     writes: ['sequence_list.md'],
     outputTags: ['<<<SEQUENCE_LIST_START>>>', '<<<SEQUENCE_LIST_END>>>'],
     group: '大纲结构',
-    dependsOn: ['worldbuilding.md', 'characters.md', 'act_map.md'],
   },
 
   // ===== 微观精铸 =====
@@ -70,7 +66,6 @@ export const TOOL_REGISTRY: ToolSpec[] = [
     writes: ['scene_beat_outline.md'],
     outputTags: ['<<<SCENE_BEAT_OUTLINE_START>>>', '<<<SCENE_BEAT_OUTLINE_END>>>'],
     group: '微观精铸',
-    dependsOn: ['worldbuilding.md', 'characters.md', 'act_map.md', 'sequence_list.md'],
   },
 
   // ===== 信息披露 =====
@@ -83,7 +78,6 @@ export const TOOL_REGISTRY: ToolSpec[] = [
     writes: ['foreshadowing.md'],
     outputTags: ['<<<FORESHADOWING_START>>>', '<<<FORESHADOWING_END>>>'],
     group: '信息披露',
-    dependsOn: ['sequence_list.md'],
   },
 
   // ===== 支线管理 =====
@@ -96,7 +90,6 @@ export const TOOL_REGISTRY: ToolSpec[] = [
     writes: ['subplots.md'],
     outputTags: ['<<<SUBPLOTS_START>>>', '<<<SUBPLOTS_END>>>'],
     group: '支线管理',
-    dependsOn: ['foreshadowing.md'],
   },
 
   // ===== 检查 =====
@@ -109,7 +102,6 @@ export const TOOL_REGISTRY: ToolSpec[] = [
     writes: ['_check_report.md'],
     outputTags: ['<<<CHECK_REPORT_START>>>', '<<<CHECK_REPORT_END>>>'],
     group: '检查',
-    dependsOn: ['scene_beat_outline.md'],
   },
 
   // ===== 系统 Tool =====
@@ -137,7 +129,7 @@ export function getTool(toolId: string): ToolSpec | undefined {
 /**
  * 获取所有可用的 Tool（v5：全部工具始终可见）
  *
- * 不再按 dependsOn 过滤。所有工具在 FC 列表中始终可见。
+ * 所有工具在 FC 列表中始终可见。
  * 结构感由每个 Tool 的 prompt 定义其层级位置 + reads 空标签机制维持。
  */
 export function getAvailableTools(): ToolSpec[] {

@@ -19,6 +19,18 @@ function buildAssetMeta(): Record<string, { group: string }> {
 
 const ASSET_META = buildAssetMeta()
 
+// ===== 文件名 → 中文展示名 映射 =====
+
+const FILE_LABELS: Record<string, string> = {
+  'worldbuilding.md': '世界观设定',
+  'characters.md': '角色设定',
+  'act_map.md': '幕结构设计',
+  'sequence_list.md': '序列清单',
+  'scene_beat_outline.md': '场景节拍大纲',
+  'foreshadowing.md': '伏笔与信息披露',
+  'subplots.md': '支线管理',
+}
+
 // ===== 内部状态 =====
 
 interface AssetState {
@@ -171,11 +183,12 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
     const { assets } = get()
     return Object.entries(assets)
       .filter(([path]) => !path.startsWith('_'))
+      .filter(([path]) => path !== 'draft_history.md')
       .map(([path, state]) => {
       const meta = ASSET_META[path]
       return {
         path,
-        filename: path.replace(/\.md$/, ''),
+        filename: FILE_LABELS[path] ?? path.replace(/\.md$/, ''),
         group: meta?.group ?? '',
         status: state.status,
       }

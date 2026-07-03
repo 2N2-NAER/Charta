@@ -32,12 +32,6 @@ export interface ToolSpec {
 
   /** 前端分组展示标签（如 '基础设定'、'大纲结构'、'微观精铸'） */
   group: string
-
-  /**
-   * 可选：依赖文件列表
-   * 如果指定，Tool 在这些文件存在前不可调用。
-   */
-  dependsOn?: string[]
 }
 
 // ===== 资产文件状态 =====
