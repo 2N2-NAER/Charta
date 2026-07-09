@@ -78,6 +78,21 @@
   font-size: 11px;
 }
 
+/* ===== v6.4 锁定角标与字数 ===== */
+
+.lockBadge {
+  margin-left: 4px;
+  font-size: 0.7em;
+  opacity: 0.6;
+  vertical-align: middle;
+}
+
+.wordCount {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  margin-left: 4px;
+}
+
 /* ===== 状态圆点 ===== */
 
 .dot {

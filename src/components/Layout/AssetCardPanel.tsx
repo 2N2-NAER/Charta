@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AssetCardData, AssetStatus } from '../../types'
 import { AssetCard } from '../AssetCard'
+import { useUIStore } from '../../store/uiStore'
+import { usePhaseStore } from '../../store/phaseStore'
 import styles from './AssetCardPanel.module.css'
 
 interface AssetCardPanelProps {
@@ -22,6 +24,9 @@ const COLLAPSIBLE_GROUPS = new Set(['大纲切片', '剧本正文'])
 
 /** 子项数量 ≤ 此值时降级为平铺（不折叠） */
 const COLLAPSE_MIN_COUNT = 2
+
+/** v6.4: 写作期父级折叠的组名 */
+const PARENT_DESIGN_GROUP = '大纲设计'
 
 // ===== 聚合状态类型 =====
 
@@ -73,6 +78,12 @@ interface CollapsibleSectionProps {
   cards: AssetCardData[]
   selectedPath: string | null
   onSelect: (path: string) => void
+  /** v6.4：外部控制的折叠状态（可选） */
+  expanded?: boolean
+  /** v6.4：外部控制的折叠切换回调（可选） */
+  onToggle?: () => void
+  /** v6.4：强制折叠壳（即使子项 ≤2 也套壳） */
+  forceCollapse?: boolean
 }
 
 function CollapsibleSection({
@@ -80,11 +91,18 @@ function CollapsibleSection({
   cards,
   selectedPath,
   onSelect,
+  expanded: externalExpanded,
+  onToggle,
+  forceCollapse,
 }: CollapsibleSectionProps) {
-  const [expanded, setExpanded] = useState(false)
+  const [localExpanded, setLocalExpanded] = useState(false)
   const prevStatusRef = useRef<Map<string, AssetStatus>>(new Map())
   const status = aggregate(cards)
   const { icon: statusIcon, label: statusLabel } = statusIconAndLabel(status)
+
+  // 展开/收起的控制权：外部传入则从外部读取，否则本地管理
+  const expanded = externalExpanded !== undefined ? externalExpanded : localExpanded
+  const toggleExpanded = onToggle ?? (() => setLocalExpanded((v) => !v))
 
   // 有 modified 子项时自动展开（只在 pending→modified 跳变时触发一次，避免抖动）
   useEffect(() => {
@@ -97,15 +115,19 @@ function CollapsibleSection({
         break
       }
     }
-    if (shouldExpand) setExpanded(true)
+    if (shouldExpand && onToggle) {
+      onToggle() // 外部控制时通过回调
+    } else if (shouldExpand) {
+      setLocalExpanded(true)
+    }
     // 记录当前状态供下次比较
     for (const card of cards) {
       prev.set(card.path, card.status)
     }
-  }, [cards])
+  }, [cards, onToggle])
 
-  // 子项 ≤2 降级为平铺——不套折叠壳
-  if (cards.length <= COLLAPSE_MIN_COUNT) {
+  // 子项 ≤2 且非强制折叠状态 → 降级为平铺
+  if (!forceCollapse && cards.length <= COLLAPSE_MIN_COUNT) {
     return (
       <div className={styles.section}>
         <div className={styles.sectionLabel}>{group}</div>
@@ -125,10 +147,10 @@ function CollapsibleSection({
     <div className={styles.section}>
       <div
         className={styles.groupHeader}
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggleExpanded}
         role="button"
         tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v) } }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpanded() } }}
       >
         <span className={styles.groupArrow}>{expanded ? '▾' : '▸'}</span>
         <span className={styles.groupTitle}>{group}</span>
@@ -163,6 +185,34 @@ export function AssetCardPanel({
   onSelect,
 }: AssetCardPanelProps) {
   const sections = groupBySection(cards)
+  const phase = usePhaseStore((s) => s.phase)
+  const collapsedSections = useUIStore((s) => s.collapsedSections)
+  const toggleSection = useUIStore((s) => s.toggleSection)
+  const setSectionCollapsed = useUIStore((s) => s.setSectionCollapsed)
+  const prevPhaseRef = useRef(phase)
+
+  // v6.4：phase 切换时联动折叠状态
+  useEffect(() => {
+    if (prevPhaseRef.current === 'designing' && phase === 'writing') {
+      // 进入写作期：折叠所有非「剧本正文」组，展开「剧本正文」
+      for (const { group } of sections) {
+        if (group === '剧本正文') {
+          setSectionCollapsed(group, false)
+        } else {
+          setSectionCollapsed(group, true)
+        }
+      }
+      // 父级「大纲设计」默认折叠
+      setSectionCollapsed(PARENT_DESIGN_GROUP, true)
+    } else if (prevPhaseRef.current === 'writing' && phase === 'designing') {
+      // 回到设计期：全部展开
+      for (const { group } of sections) {
+        setSectionCollapsed(group, false)
+      }
+      setSectionCollapsed(PARENT_DESIGN_GROUP, false)
+    }
+    prevPhaseRef.current = phase
+  }, [phase, sections, setSectionCollapsed])
 
   if (cards.length === 0) {
     return (
@@ -177,13 +227,117 @@ export function AssetCardPanel({
     )
   }
 
+  // v6.4：写作期分组——「剧本正文」单独放，其余全部收入「大纲设计」父级
+  const isWriting = phase === 'writing'
+  const bodySections = sections.filter(({ group }) => group === '剧本正文')
+  const designSections = sections.filter(({ group }) => group !== '剧本正文')
+
+  // 设计期渲染：所有组独立折叠
+  if (!isWriting) {
+    return (
+      <div className={styles.panel}>
+        <div className={styles.panelHeader}>
+          <div className={styles.title}>资产卡片</div>
+        </div>
+        <div className={styles.body}>
+          {sections.map(({ group, cards: sectionCards }) =>
+            COLLAPSIBLE_GROUPS.has(group) ? (
+              <CollapsibleSection
+                key={group}
+                group={group}
+                cards={sectionCards}
+                selectedPath={selectedPath}
+                onSelect={onSelect}
+                expanded={collapsedSections[group] === false ? true : collapsedSections[group] === true ? false : undefined}
+                onToggle={() => toggleSection(group)}
+              />
+            ) : (
+              <div key={group} className={styles.section}>
+                <div className={styles.sectionLabel}>{group}</div>
+                {sectionCards.map((card) => (
+                  <AssetCard
+                    key={card.path}
+                    data={card}
+                    isSelected={card.path === selectedPath}
+                    onSelect={() => onSelect(card.path)}
+                  />
+                ))}
+              </div>
+            ),
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // 写作期渲染：「大纲设计」父级折叠 + 「剧本正文」独立折叠
+  const designParentExpanded = collapsedSections[PARENT_DESIGN_GROUP] === false
+  const allDesignCards = designSections.flatMap(({ cards: c }) => c)
+  const designParentStatus = aggregate(allDesignCards)
+  const { icon: dIcon, label: dLabel } = statusIconAndLabel(designParentStatus)
+
   return (
     <div className={styles.panel}>
       <div className={styles.panelHeader}>
         <div className={styles.title}>资产卡片</div>
       </div>
       <div className={styles.body}>
-        {sections.map(({ group, cards: sectionCards }) =>
+        {/* 大纲设计 - 父级折叠 */}
+        <div className={styles.section}>
+          <div
+            className={styles.groupHeader}
+            onClick={() => toggleSection(PARENT_DESIGN_GROUP)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                toggleSection(PARENT_DESIGN_GROUP)
+              }
+            }}
+          >
+            <span className={styles.groupArrow}>{designParentExpanded ? '▾' : '▸'}</span>
+            <span className={styles.groupTitle}>🔒 {PARENT_DESIGN_GROUP}</span>
+            <span className={styles.groupCount}>
+              ({allDesignCards.length})
+            </span>
+            <span className={styles.groupStatusBadge} data-kind={designParentStatus.kind}>
+              {dIcon} {dLabel}
+            </span>
+          </div>
+          {designParentExpanded && (
+            <div className={styles.subList}>
+              {designSections.map(({ group, cards: sectionCards }) =>
+                COLLAPSIBLE_GROUPS.has(group) ? (
+                  <CollapsibleSection
+                    key={group}
+                    group={group}
+                    cards={sectionCards}
+                    selectedPath={selectedPath}
+                    onSelect={onSelect}
+                    expanded={collapsedSections[group] === false ? true : collapsedSections[group] === true ? false : undefined}
+                    onToggle={() => toggleSection(group)}
+                  />
+                ) : (
+                  <div key={group} className={styles.section}>
+                    <div className={styles.sectionLabel}>{group}</div>
+                    {sectionCards.map((card) => (
+                      <AssetCard
+                        key={card.path}
+                        data={card}
+                        isSelected={card.path === selectedPath}
+                        onSelect={() => onSelect(card.path)}
+                      />
+                    ))}
+                  </div>
+                ),
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 剧本正文 */}
+        {bodySections.map(({ group, cards: sectionCards }) =>
           COLLAPSIBLE_GROUPS.has(group) ? (
             <CollapsibleSection
               key={group}
@@ -191,6 +345,9 @@ export function AssetCardPanel({
               cards={sectionCards}
               selectedPath={selectedPath}
               onSelect={onSelect}
+              expanded={collapsedSections[group] === false ? true : collapsedSections[group] === true ? false : undefined}
+              onToggle={() => toggleSection(group)}
+              forceCollapse={sectionCards.length > 0} // 写作期「剧本正文」始终套折叠壳
             />
           ) : (
             <div key={group} className={styles.section}>

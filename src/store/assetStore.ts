@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { AssetCardData, AssetStatus } from '../types'
 import type { FileManager } from '../orchestrator/fileManager'
 import { SUBAGENT_REGISTRY, SKILLS_BY_SUBAGENT } from '../skills/skillLoader'
+import { usePhaseStore } from './phaseStore'
 
 // ===== 文件→分组 查找表（从 Subagent × Skill 构建） =====
 
@@ -41,6 +42,8 @@ interface AssetState {
   status: AssetStatus
   /** 变化前的内容（用于 diff 对照的左视窗） */
   previousContent?: string
+  /** v6.4：中文字数缓存（仅 chapters/* 计算） */
+  wordCount?: number
 }
 
 /**
@@ -96,7 +99,8 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
       if (info.exists) {
         try {
           const content = await fm.readFile(info.path)
-          assets[info.path] = { ...assets[info.path], content, status: 'generated' }
+          const wordCount = computeWordCount(info.path, content)
+          assets[info.path] = { ...assets[info.path], content, status: 'generated', wordCount }
         } catch {
           // 读取失败，保持 pending
         }
@@ -137,6 +141,8 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
             : content
               ? 'generated'
               : 'pending'
+        // v6.4：章节文件计算中文字数
+        const wordCount = computeWordCount(path, content)
         return {
           assets: {
             ...state.assets,
@@ -144,6 +150,7 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
               content,
               previousContent: isChanged ? prev.content : prev?.previousContent,
               status: newStatus,
+              wordCount,
             },
           },
         }
@@ -169,7 +176,8 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
       if (info.exists) {
         try {
           const content = await fm.readFile(info.path)
-          assets[info.path] = { content, status: 'generated' }
+          const wordCount = computeWordCount(info.path, content)
+          assets[info.path] = { content, status: 'generated', wordCount }
         } catch {
           assets[info.path] = { ...INITIAL_ASSET_STATE }
         }
@@ -184,13 +192,18 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
       if (state.status === 'generated') {
         const prev = prevAssets[path]
         if (prev && prev.content !== state.content && prev.content !== '') {
-          assets[path] = { ...state, previousContent: prev.content, status: 'modified' }
+          assets[path] = {
+            ...state,
+            previousContent: prev.content,
+            status: 'modified',
+            wordCount: state.wordCount,
+          }
         }
       } else if (state.status === 'modified') {
         // 保持 modified 文件的 previousContent（从旧状态继承）
         const prev = prevAssets[path]
         if (prev?.previousContent) {
-          assets[path] = { ...state, previousContent: prev.previousContent }
+          assets[path] = { ...state, previousContent: prev.previousContent, wordCount: state.wordCount }
         }
       }
     }
@@ -200,6 +213,7 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
 
   getAssetList: () => {
     const { assets } = get()
+    const phaseStore = usePhaseStore.getState()
     return Object.entries(assets)
       .filter(([path]) => !path.startsWith('_'))
       .filter(([path]) => path !== 'draft_history.md')
@@ -219,6 +233,12 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
         filename: computeLabel(path),
         group: meta?.group ?? fallbackGroup,
         status: state.status,
+        // v6.4 扩展
+        locked: phaseStore.isLockedPath(path),
+        wordCount: state.wordCount,
+        metaInfo: path.startsWith('chapters/')
+          ? path.replace(/^chapters\//, '').replace(/\.md$/, '')
+          : undefined,
       }
     })
   },
@@ -227,3 +247,13 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
     set({ assets: {}, fileManager: null })
   },
 }))
+
+// ===== v6.4 辅助函数 =====
+
+/** 计算中文汉字数（仅 chapters/* 路径计算，其余返回 undefined） */
+function computeWordCount(path: string, content: string): number | undefined {
+  if (!path.startsWith('chapters/')) return undefined
+  if (!content) return 0
+  const chineseChars = content.match(/[一-鿿]/g)
+  return chineseChars ? chineseChars.length : 0
+}

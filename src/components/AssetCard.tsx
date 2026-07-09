@@ -45,10 +45,18 @@ export function AssetCard({ data, isSelected, onSelect }: AssetCardProps) {
     >
       <span className={styles.icon}>📄</span>
       <div className={styles.info}>
-        <div className={styles.name}>{data.filename}</div>
+        <div className={styles.name}>
+          {data.filename}
+          {data.locked && <span className={styles.lockBadge}>🔒</span>}
+        </div>
         <div className={styles.statusRow}>
           <span className={`${styles.dot} ${dotClass}`} />
           {getStatusLabel(data.status)}
+          {data.wordCount !== undefined && (
+            <span className={styles.wordCount}>
+              · {data.wordCount > 0 ? `${data.wordCount}字` : '--'}
+            </span>
+          )}
         </div>
       </div>
     </div>

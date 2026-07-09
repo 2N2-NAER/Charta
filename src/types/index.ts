@@ -105,6 +105,12 @@ export interface AssetCardData {
   filename: string
   group: string
   status: AssetStatus
+  /** v6.4：是否被 Phase Gate 冻结（只读） */
+  locked?: boolean
+  /** v6.4：正文字数（仅 chapters/* 计算） */
+  wordCount?: number
+  /** v6.4：额外展示文本（如 "S1-1 所属"） */
+  metaInfo?: string
 }
 
 // ===== 文件条目 =====
@@ -151,6 +157,9 @@ export interface ToolResult {
 
   /** Tool 输出内容 */
   output?: string
+
+  /** v6.4：软校验警告 */
+  warnings?: string[]
 
   /** 本次执行实际使用的 Skill ID（四层框架） */
   skillId?: string
@@ -241,6 +250,9 @@ export interface ExecutionEvent {
 
   /** 人类可读的中文描述 */
   message: string
+
+  /** v6.4：软校验警告（非阻塞，提示用） */
+  warnings?: string[]
 }
 
 /** 执行事件回调 */

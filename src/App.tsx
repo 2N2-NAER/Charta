@@ -12,10 +12,11 @@ import { BottomPanel } from './components/BottomBar/BottomPanel'
 import { useAssetStore } from './store/assetStore'
 import { useChatStore } from './store/chatStore'
 import { useUIStore } from './store/uiStore'
+import { usePhaseStore } from './store/phaseStore'
 import { InMemoryFileManager, DEFAULT_ASSET_PATHS } from './orchestrator/fileManager'
 import { LLMClient } from './llm/client'
 import { OrchestratorEngine } from './orchestrator/orchestratorEngine'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 function App() {
   const [isReady, setIsReady] = useState(false)
@@ -25,6 +26,8 @@ function App() {
   const initChatStore = useChatStore((s) => s.init)
   const selectedCard = useUIStore((s) => s.selectedCard)
   const setSelectedCard = useUIStore((s) => s.setSelectedCard)
+  const phase = usePhaseStore((s) => s.phase)
+  const prevPhaseRef = useRef(phase)
 
   // 初始化：创建核心实例并注入 Store
   useEffect(() => {
@@ -37,6 +40,19 @@ function App() {
     initChatStore(engine)
     setIsReady(true)
   }, [initAssetStore, initChatStore])
+
+  // v6.4：phase 切换时联动 selectedPath
+  useEffect(() => {
+    if (prevPhaseRef.current === 'designing' && phase === 'writing') {
+      // 进入写作期：若有已生成的章节，自动选中第一个
+      const cards = useAssetStore.getState().getAssetList()
+      const firstChapter = cards.find((c) => c.path.startsWith('chapters/'))
+      if (firstChapter) {
+        setSelectedCard(firstChapter.path)
+      }
+    }
+    prevPhaseRef.current = phase
+  }, [phase, setSelectedCard])
 
   // 获取当前选中卡片的内容
   const selectedCardData = selectedCard ? assets[selectedCard] : null
@@ -62,6 +78,7 @@ function App() {
             filename={selectedLabel}
             content={selectedCardData?.content ?? undefined}
             isLoading={!isReady}
+            selectedPath={selectedCard ?? undefined}
           />,
           <BaselinePanel
             filename={selectedLabel}

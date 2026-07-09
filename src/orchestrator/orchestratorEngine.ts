@@ -324,6 +324,9 @@ export class OrchestratorEngine {
   private fileManager: FileManager
   private onEvent?: ExecutionEventCallback
 
+  /** v6.4 角色行为追踪：key=target_chapter，值=该章中提取的 BEHAVIOR_TRACK 注释列表 */
+  private behaviorTrack: Map<string, string[]> = new Map()
+
   constructor(llm: LLMClient, fileManager: FileManager) {
     this.llm = llm
     this.fileManager = fileManager
@@ -417,6 +420,8 @@ export class OrchestratorEngine {
     // reset_all 特殊处理：空 writes + 空 outputTags = 不调 LLM，直接清空
     if (isResetSkill(skill)) {
       await this.fileManager.clearAll()
+      // v6.4：清空行为追踪
+      this.behaviorTrack.clear()
       // v6.1 F.4：reset_all 触发时同步把 phase 打回 designing、清空 baselines，
       // 保证状态机一致归零（clearAll 已删光 chapters/_seq 等全部内容故无需额外清理这些产物路径）。
       usePhaseStore.getState().reset()
@@ -469,16 +474,55 @@ export class OrchestratorEngine {
       const resolvedPath = `chapters/${target}.md`
       effectiveWrites = [resolvedPath, ...skill.writes.slice(1)]
 
-      // resolveExtraContext：注入既存草稿与上游场记切片触发 create/refine 双模自判定
+      // resolveExtraContext：注入既存草稿 + 同幕全部序列 + 前章正文，触发 create/refine 双模自判定
       const currentDraft = await safeRead(this.fileManager, resolvedPath)
       const seqBeatsDoc = await safeRead(
         this.fileManager,
         `sequences/${normalizeToSequenceId(target)}.md`,
       )
+
+      // v6.4：同幕全部序列（按幕号聚合，替代旧 ±1 相邻序列）
+      const seqId = normalizeToSequenceId(target)
+      const actPrefix = seqId.replace(/-\d+$/, '')
+      const seqPaths = allPaths
+        .filter(a => a.path.startsWith('sequences/') && a.path.endsWith('.md') && a.exists)
+        .map(a => a.path)
+        .sort()
+      const sameActPaths = seqPaths.filter(p => {
+        const sId = p.replace(/^sequences\//, '').replace(/\.md$/, '')
+        return sId.startsWith(actPrefix + '-')
+      })
+      const sameActDocs = await Promise.all(sameActPaths.map(p => safeRead(this.fileManager, p)))
+      const sameActXml = sameActPaths
+        .map((p, i) => {
+          const sId = p.replace(/^sequences\//, '').replace(/\.md$/, '')
+          return `<slice id="${sId}">\n${sameActDocs[i]}\n</slice>`
+        })
+        .join('\n')
+
+      // v6.4：紧前章节正文，供 Writer 感知实际文风（仅 CREATE 模式注入）
+      const chapterPaths = allPaths
+        .filter(a => a.path.startsWith('chapters/') && a.path.endsWith('.md') && a.exists)
+        .map(a => a.path)
+        .sort()
+      const targetChapterPath = resolvedPath
+      const chapterIdx = chapterPaths.findIndex(p => p === targetChapterPath)
+      const prevChapterDoc = (!currentDraft && chapterIdx > 0)
+        ? await safeRead(this.fileManager, chapterPaths[chapterIdx - 1])
+        : ''
+
+      // v6.4：角色行为追踪摘要
+      const behaviorTrackingSummary = [...this.behaviorTrack.entries()]
+        .map(([ch, items]) => `<chapter id="${ch}">\n${items.map(i => `  - ${i}`).join('\n')}\n</chapter>`)
+        .join('\n\n')
+
       context = appendExtraLabels(context, [
         { label: 'current_draft', content: currentDraft },
         { label: 'current_target', content: currentDraft },
         { label: 'current_sequence_beats', content: seqBeatsDoc },
+        { label: 'same_act_sequences', content: sameActXml },
+        { label: 'previous_chapter_draft', content: prevChapterDoc },
+        { label: 'character_behavior_tracking', content: behaviorTrackingSummary },
       ])
     }
 
@@ -498,6 +542,31 @@ export class OrchestratorEngine {
           for (const [file, content] of Object.entries(validation.extracted)) {
             await this.fileManager.writeFile(file, content)
           }
+
+          // v6.4：行为追踪提取 + 软校验
+          if (subagent.id === 'script_writer') {
+            this.extractBehaviorTrack(target, output)
+            const softWarnings = this.runSoftValidation(output)
+            if (softWarnings.length > 0) {
+              this.emit('tool_complete', {
+                toolId: subagent.id,
+                toolName: subagent.name,
+                skillId: skill.skillId,
+                skillName: skill.name,
+                writes: Object.keys(validation.extracted),
+                message: `${subagent.name} 完成（含 ${softWarnings.length} 条写作建议）`,
+              })
+              return {
+                success: true,
+                writes: Object.keys(validation.extracted),
+                output,
+                skillId: skill.skillId,
+                skillName: skill.name,
+                warnings: softWarnings,
+              }
+            }
+          }
+
           return {
             success: true,
             writes: Object.keys(validation.extracted),
@@ -533,6 +602,58 @@ export class OrchestratorEngine {
     }
 
     return { success: false, error: `输出校验失败（已重试${MAX_RETRIES}次）` }
+  }
+
+  /**
+   * v6.4：从 script_writer 输出中提取角色行为追踪注释。
+   */
+  private extractBehaviorTrack(target: string, output: string): void {
+    const regex = /<!--\s*BEHAVIOR_TRACK:\s*(.+?)\s*-->/g
+    const tracks: string[] = []
+    let match: RegExpExecArray | null
+    while ((match = regex.exec(output)) !== null) {
+      tracks.push(match[1].trim())
+    }
+    if (tracks.length > 0) {
+      // 先删再插，保证 LRU 语义正确（Map.set 不改变已有 key 的插入位置）
+      this.behaviorTrack.delete(target)
+      this.behaviorTrack.set(target, tracks)
+      // 最多保留 5 章追踪记录
+      while (this.behaviorTrack.size > 5) {
+        const oldest = this.behaviorTrack.keys().next().value
+        if (oldest) this.behaviorTrack.delete(oldest)
+      }
+    }
+  }
+
+  /**
+   * v6.4：视听转化软校验，非阻塞——仅在 execution log 中产生 warning。
+   */
+  private runSoftValidation(output: string): string[] {
+    const warnings: string[] = []
+
+    // 1. 全知叙述句式检测
+    if (/他不知道[，,\s]*这是[他她].*?[最后终]/.test(output)) {
+      warnings.push('检测到疑似全知叙述句式（如"他不知道，这是他最后一次..."）')
+    }
+
+    // 2. 直白情感标签检测
+    const emotionMatches = output.match(/她?很(?:伤心|难过|生气|愤怒|害怕|紧张|开心|高兴|失望|焦虑|恐惧)/g)
+    if (emotionMatches && emotionMatches.length > 0) {
+      warnings.push(`检测到 ${emotionMatches.length} 处直白情感标签：${emotionMatches.slice(0, 3).join('、')}。建议用行为替代`)
+    }
+
+    // 3. 过长无对话描写检测
+    const paragraphs = output.split(/\n\n+/)
+    for (let i = 0; i < paragraphs.length; i++) {
+      const lines = paragraphs[i].split('\n').filter(l => l.trim())
+      if (lines.length > 5 && !/[「「"」"」：]/.test(paragraphs[i])) {
+        warnings.push(`检测到第 ${i + 1} 段超过 5 行的无对话描写段落`)
+        break
+      }
+    }
+
+    return warnings
   }
 
   /**

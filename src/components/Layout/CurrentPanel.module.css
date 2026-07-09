@@ -71,3 +71,15 @@
   font-size: 13px;
   user-select: none;
 }
+
+/* v6.4：写作期只读提示条 */
+.readonlyBanner {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #3b5998;
+  background: rgba(59, 89, 152, 0.08);
+  border: 1px solid rgba(59, 89, 152, 0.2);
+  border-radius: 6px;
+  line-height: 1.4;
+}
