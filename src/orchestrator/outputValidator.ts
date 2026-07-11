@@ -64,3 +64,50 @@ function extractBetween(text: string, startTag: string, endTag: string): string 
   if (endIdx === -1) return null
   return text.slice(contentStart, endIdx).trim()
 }
+
+/**
+ * v6.6：多文件输出提取（input_normalizer 专用）。
+ *
+ * 归一化一次可能产多个种子资产（worldbuilding/characters/act_map/...），
+ * validateOutput 只写 writes[0] 无法承载。本函数在外层 START/END TAG 内解析
+ * `<<<FILE:path>>>...<<<END:path>>>` 块，返回 path→content 映射。
+ *
+ * 守 INV-1 边缘：独立新函数，不改 validateOutput 主体。
+ */
+export function extractMultiFileOutput(output: string, skill: SkillSpec): ValidationResult {
+  const [startTag, endTag] = skill.outputTags
+  if (!startTag || !endTag) {
+    return { valid: true, missingTags: [], extracted: {} }
+  }
+
+  const missingTags: string[] = []
+  if (!output.includes(startTag)) missingTags.push(startTag)
+  if (!output.includes(endTag)) missingTags.push(endTag)
+  if (missingTags.length > 0) {
+    return { valid: false, missingTags, extracted: {} }
+  }
+
+  const region = extractBetween(output, startTag, endTag) ?? ''
+  const extracted: Record<string, string> = {}
+  const fileRegex = /<<<FILE:([^>]+)>>>([\s\S]*?)<<<END:\1>>>/g
+  let match: RegExpExecArray | null
+  while ((match = fileRegex.exec(region)) !== null) {
+    const path = match[1].trim()
+    const content = match[2].trim()
+    if (path && content) {
+      extracted[path] = content
+    }
+  }
+
+  const structuralError =
+    Object.keys(extracted).length === 0
+      ? '归一化未产出任何 <<<FILE:path>>>...<<<END:path>>> 块'
+      : undefined
+
+  return {
+    valid: structuralError === undefined,
+    missingTags: [],
+    extracted,
+    structuralError,
+  }
+}

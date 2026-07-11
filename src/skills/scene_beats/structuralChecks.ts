@@ -5,8 +5,8 @@
  *   - SKILL body 让 LLM 主动生成合规输出(第一道防线,提高首次通过率);
  *   - 本文件让 validator 机械拦截不合规输出(第二道防线,retry 时反馈具体错位)。
  *
- * 由 orchestratorEngine.runPipeline 在每次调度时动态挂载到 SkillSpec.structuralCheck,
- * 因为 checkBeatTable 需要 scenesMd 作 SC-ID 集合参照——跨步骤依赖不适合静态注册。
+ * 由 orchestratorEngine.runSequencePipeline 在每次调度时动态挂载到 SkillSpec.structuralCheck,
+ * 因为 checkBeatBlocks 需要当前 <target_scene> 作 SC-ID 参照——跨步骤依赖不适合静态注册。
  *
  * 返回 null = 通过;返回中文字符串 = 首条违规详情,追加到 retry userContent 尾部。
  */
@@ -15,15 +15,6 @@
 
 /** 场景 ID:SC-{序列 ID}-{两位数字} 如 SC-S1-1-01 */
 const SCENE_ID_REGEX = /^SC-[A-Z]\d+-\d+-\d{2}$/
-
-/** 节拍序号:B-{场景 ID}-{单位数字} 如 B-SC-S1-1-01-1 */
-const BEAT_ID_REGEX = /^B-SC-[A-Z]\d+-\d+-\d{2}-\d+$/
-
-/** 节拍类型主词五选一(允许后缀变体如 "铺垫·冷启",只判主词) */
-const BEAT_TYPE_KEYWORDS = ['铺垫', '触发', '对抗', '转折', '收束'] as const
-
-const SCENE_TABLE_COLUMNS = 7
-const BEAT_TABLE_COLUMNS = 6
 
 // ===== 通用表格解析 =====
 
@@ -68,168 +59,108 @@ function splitRow(line: string): string[] {
   return inner.split('|').map((c) => c.trim())
 }
 
-// ===== 裸竖线检测 =====
-
-/**
- * 检测正文中是否存在"表格外的裸竖线",或表格单元格内部的可疑竖线。
- *
- * 由于 markdown 表格本身就靠 `|` 分列,单元格内部若混入额外 `|` 会破坏解析,
- * 表现为某行 split 后列数异常——由 checkColumnCount 拦截更精确。
- * 这里只做补充:非表格行不应出现 `|`(注释除外)。
- */
-function findStrayPipe(md: string): string | null {
-  const lines = md.split(/\r?\n/)
-  for (const raw of lines) {
-    const line = raw.trim()
-    if (!line) continue
-    if (line.startsWith('|')) continue // 表格行合法
-    if (line.startsWith('<!--')) continue // HTML 注释合法
-    if (line.includes('|')) {
-      return `第 "${line.slice(0, 40)}${line.length > 40 ? '...' : ''}" 出现表格外的裸竖线 \`|\`,请用顿号/逗号替换`
-    }
-  }
-  return null
-}
-
 // ===== 场景表校验 =====
 
 /**
  * 校验 scene_designer 产出的场景表。
  *
- * 检查项:
- *   1. 能解析为合法 markdown 表格
- *   2. 列数 = 7
- *   3. 至少 3 行数据(SKILL body 约束 N∈[3,6],此处只判下限;超上限 6 不硬拦作为宽松保底)
- *   4. 场景 ID 匹配 SCENE_ID_REGEX
- *   5. 每行列数一致(即无因单元格裸竖线导致 split 错位)
- *   6. 视角人物不为空
+ * v6.8 放宽后阻塞校验仅 2 项(保护下游流转底线):
+ *   1. 能解析为合法 markdown 表格(段②→段③ SC-ID 提取的结构前提)
+ *   2. 每行场景 ID 匹配 SCENE_ID_REGEX(extractSceneIds/sliceSceneRow/checkBeatBlocks B-ID 全靠此格式)
+ * 列数=7/行列一致/裸竖线 3 项交软校验 warning + SKILL body 引导。
  *
  * @param md - extractBetween 提取的场景表正文(不含 START/END TAG)
  * @returns null=通过;string=首条违规详情
  */
 export function checkSceneTable(md: string): string | null {
-  const strayErr = findStrayPipe(md)
-  if (strayErr) return strayErr
-
   const table = parseMarkdownTable(md)
   if (!table) return '未能解析出合法 Markdown 表格(检查表头 `|...|` 与分隔行 `|---|...|` 是否规范)'
 
-  if (table.header.length !== SCENE_TABLE_COLUMNS) {
-    return `场景表列数 ${table.header.length} ≠ 期望值 7,请补齐/删除表头列使其恰好为 \`场景ID|场景功能|场景目标(Objective)|冲突与障碍|场景结果(Outcome)|时空边界|视角人物\``
-  }
-
-  if (table.rows.length < 3) {
-    return `场景表仅 ${table.rows.length} 行数据,少于下限 3 行,请补足场景数`
-  }
-
   for (let i = 0; i < table.rows.length; i++) {
-    const row = table.rows[i]
-    if (row.length !== SCENE_TABLE_COLUMNS) {
-      return `第 ${i + 1} 行数据列数 ${row.length} ≠ 期望值 7(疑似单元格内含未转义 \`|\` 破坏分隔),请检查该行内容`
-    }
-    const [sceneId, , , , , , viewpoint] = row
+    const [sceneId] = table.rows[i]
     if (!SCENE_ID_REGEX.test(sceneId)) {
       return `第 ${i + 1} 行场景ID "${sceneId}" 不符合格式 SC-S{幕}-{序}-{nn}(如 SC-S1-1-01)`
     }
-    if (!viewpoint || viewpoint === '—' || viewpoint === '-') {
-      return `第 ${i + 1} 行"视角人物"为空或 \`—\`,场景必须有明确视角人物(须落在 <characters> 注册表内)`
-    }
   }
 
   return null
 }
 
-// ===== 节拍表校验 =====
+// ===== 节拍块校验（v6.7：节拍改非表格字段块，逐场景 scope） =====
+
+interface BeatBlock {
+  id: string
+  fields: Record<string, string>
+}
 
 /**
- * 校验 beat_writer 产出的节拍表,含跨表 SC-ID 引用完整性校验。
+ * 解析节拍块序列。块头 `[BEAT B-...]` 整行锚定,字段行 `字段: 值` 非贪婪首冒号。
+ * 块间空行/`<!-- -->` 注释容忍;块内无法识别的非空行计入 strayLines 供报错。
+ */
+export function parseBeatBlocks(md: string): { blocks: BeatBlock[]; strayLines: string[] } {
+  const lines = md.split(/\r?\n/)
+  const blocks: BeatBlock[] = []
+  const strayLines: string[] = []
+  let cur: BeatBlock | null = null
+  const headRe = /^\[BEAT\s+(B-SC-[A-Z]\d+-\d+-\d{2}-\d+)\]\s*$/
+  const fieldRe = /^(\S+?):\s*(.*)$/
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line || line.startsWith('<!--')) continue
+    const h = headRe.exec(line)
+    if (h) {
+      cur = { id: h[1], fields: {} }
+      blocks.push(cur)
+      continue
+    }
+    const f = fieldRe.exec(line)
+    if (f && cur) {
+      cur.fields[f[1].trim()] = f[2].trim()
+      continue
+    }
+    strayLines.push(line) // 块外/无法识别行
+  }
+  return { blocks, strayLines }
+}
+
+/**
+ * 单场景节拍块校验。sceneId = 本次 <target_scene>,用于反查块头内嵌 SC-ID 一致性。
  *
- * 检查项:
- *   1. 能解析为合法 markdown 表格
- *   2. 列数 = 6
- *   3. 节拍序号匹配 BEAT_ID_REGEX
- *   4. 节拍类型主词 ∈ BEAT_TYPE_KEYWORDS(允许后缀变体如 "铺垫·冷启")
- *   5. 同场景相邻两拍主词不相同
- *   6. 所属场景 ∈ scenesMd 中出现的 SC-ID 集合(若提供)
- *   7. 每行列数一致
+ * v6.8 放宽后阻塞校验仅 2 项:
+ *   1. 至少 1 个 [BEAT] 块(防空输出落盘成空壳)
+ *   2. 块头内嵌 SC-ID = 当前场景(防写错场景;块头 B-ID 格式已由 parseBeatBlocks.headRe 保证,无需重复校验)
+ * 字段齐全/类型词库/相邻规则/strayLines 交 SKILL body 引导 + 软校验 warning。
  *
- * @param md - extractBetween 提取的节拍表正文
- * @param scenesMd - 上一步 scene_designer 的场景表(用于 SC-ID 集合参照);
- *                   缺省时跳过第 6 项(用于孤立测试或 REFINE 模式无 prev_scenes 场景)
+ * @param md - extractBetween 提取的节拍块正文(不含 START/END TAG)
+ * @param sceneId - 本次目标场景 ID(引擎循环时的 <target_scene>)
  * @returns null=通过;string=首条违规详情
  */
-export function checkBeatTable(md: string, scenesMd?: string): string | null {
-  const strayErr = findStrayPipe(md)
-  if (strayErr) return strayErr
+export function checkBeatBlocks(md: string, sceneId: string): string | null {
+  const { blocks } = parseBeatBlocks(md)
+  if (blocks.length === 0) return '未解析出任何 [BEAT ...] 节拍块'
 
-  const table = parseMarkdownTable(md)
-  if (!table) return '未能解析出合法 Markdown 表格(检查表头 `|...|` 与分隔行 `|---|...|` 是否规范)'
-
-  if (table.header.length !== BEAT_TABLE_COLUMNS) {
-    return `节拍表列数 ${table.header.length} ≠ 期望值 6,请补齐/删除表头列使其恰好为 \`所属场景|节拍序号|节拍类型|动作-反应描述|情绪/信息变化|关联伏笔\``
+  for (let i = 0; i < blocks.length; i++) {
+    const { id } = blocks[i]
+    // 内嵌 SC-ID 必须 = 当前场景(块头格式已由 parseBeatBlocks.headRe 保证)
+    const embedded = id.replace(/^B-/, '').replace(/-\d+$/, '')
+    if (embedded !== sceneId) return `第 ${i + 1} 块 "${id}" 内嵌场景 "${embedded}" ≠ 目标场景 "${sceneId}"`
   }
-
-  if (table.rows.length === 0) {
-    return '节拍表无任何数据行'
-  }
-
-  // 预计算 scenes SC-ID 集合(若提供 scenesMd)
-  const validSceneIds = scenesMd ? extractSceneIds(scenesMd) : null
-
-  // 追踪同场景连续同类型:key=sceneId,value=上一拍的类型主词
-  const lastTypePerScene = new Map<string, string>()
-
-  for (let i = 0; i < table.rows.length; i++) {
-    const row = table.rows[i]
-    if (row.length !== BEAT_TABLE_COLUMNS) {
-      return `第 ${i + 1} 行数据列数 ${row.length} ≠ 期望值 6(疑似单元格内含未转义 \`|\` 破坏分隔)`
-    }
-
-    const [sceneId, beatId, beatType] = row
-
-    if (!BEAT_ID_REGEX.test(beatId)) {
-      return `第 ${i + 1} 行节拍序号 "${beatId}" 不符合格式 B-SC-S{幕}-{序}-{nn}-{n}(如 B-SC-S1-1-01-1)`
-    }
-
-    if (!SCENE_ID_REGEX.test(sceneId)) {
-      return `第 ${i + 1} 行所属场景 "${sceneId}" 不符合场景ID格式 SC-S{幕}-{序}-{nn}`
-    }
-
-    // 跨表引用完整性
-    if (validSceneIds && !validSceneIds.has(sceneId)) {
-      return `第 ${i + 1} 行所属场景 "${sceneId}" 在 <prev_scenes> 场景表中不存在(合法 SC-ID 集合:${Array.from(validSceneIds).join(', ')})`
-    }
-
-    // 节拍序号内嵌的场景 ID 应与"所属场景"列一致
-    const embeddedSceneId = beatId.replace(/^B-/, '').replace(/-\d+$/, '')
-    if (embeddedSceneId !== sceneId) {
-      return `第 ${i + 1} 行节拍序号 "${beatId}" 内嵌的场景ID "${embeddedSceneId}" 与"所属场景"列 "${sceneId}" 不一致`
-    }
-
-    // 类型主词命中五选一之一(允许后缀变体)
-    const primaryType = BEAT_TYPE_KEYWORDS.find((k) => beatType.startsWith(k))
-    if (!primaryType) {
-      return `第 ${i + 1} 行节拍类型 "${beatType}" 未命中主词库 {${BEAT_TYPE_KEYWORDS.join(',')}}(允许后缀变体如"铺垫·冷启")`
-    }
-
-    // 同场景相邻同类型检测
-    const lastType = lastTypePerScene.get(sceneId)
-    if (lastType === primaryType) {
-      return `第 ${i + 1} 行(场景 ${sceneId})与上一拍类型主词均为 "${primaryType}",违反"同场景相邻不得同类型"规则`
-    }
-    lastTypePerScene.set(sceneId, primaryType)
-  }
-
   return null
 }
 
+/** 数块头(供软校验计数) */
+export function countBeatBlocks(md: string): number {
+  return (md.match(/^\[BEAT\s+B-SC-[A-Z]\d+-\d+-\d{2}-\d+\]\s*$/gm) ?? []).length
+}
+
 /**
- * 从场景表 markdown 中抽取所有 SC-ID 集合(供 checkBeatTable 跨表引用校验用)。
+ * 从场景表 markdown 中抽取所有 SC-ID 集合。
  *
+ * v6.7：由引擎 runSequencePipeline 消费(逐场景循环发起 beat_writer),故导出。
  * 直接正则扫描而非依赖 parseMarkdownTable——因为传入的 scenesMd 是刚通过 checkSceneTable
  * 的合法产物,格式已保证;且此处只需 SC-ID 集合不关心其它列。
  */
-function extractSceneIds(scenesMd: string): Set<string> {
+export function extractSceneIds(scenesMd: string): Set<string> {
   const ids = new Set<string>()
   const regex = /SC-[A-Z]\d+-\d+-\d{2}/g
   let match: RegExpExecArray | null

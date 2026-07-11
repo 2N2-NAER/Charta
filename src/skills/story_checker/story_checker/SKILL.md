@@ -39,6 +39,7 @@ outputTags: ['<<<CHECK_REPORT_START>>>', '<<<CHECK_REPORT_END>>>']
 2. 纯 Markdown 格式
 3. 不要输出开场白或说明文字
 4. 每个发现必须有明确的**文件定位**（哪个文件、哪个段落/表格行）
+5. 序列级问题的「目标序列」必填（`S{幕}-{序}`）；报告末尾必须输出 `<!-- AUDIT_SCOPE -->` 审计范围标记（见核心原则第 7 条）
 
 ---
 
@@ -143,11 +144,11 @@ outputTags: ['<<<CHECK_REPORT_START>>>', '<<<CHECK_REPORT_END>>>']
 
 ## 汇总发现
 
-| 严重等级 | 问题描述 | 所在文件 | 建议修复方向 |
-|---------|---------|---------|------------|
-| critical | 伏笔 F-02 缺失... | sequences/S1-3.md: SC-... | 在 S1-3 中增加铺设 F-02 的场景 |
-| major | 主角行为与性格不符... | sequences/S2-1.md: SC-... | 修改节拍动作，使主角更主动 |
-| minor | 序列 S2-2 缺少... | sequence_list.md | 建议补充可选钩子 |
+| 严重等级 | 层级 | 目标序列 | 问题描述 | 所在文件 | 建议修复方向 |
+|---------|------|---------|---------|---------|------------|
+| critical | 序列 | S1-3 | 伏笔 F-02 缺失... | sequences/S1-3.md: SC-... | 在 S1-3 中增加铺设 F-02 的场景 |
+| major | 序列 | S2-1 | 主角行为与性格不符... | sequences/S2-1.md: SC-... | 修改节拍动作，使主角更主动 |
+| minor | 上游 | — | 序列 S2-2 缺少... | sequence_list.md | 建议补充可选钩子 |
 
 ### 严重等级说明
 - **critical**：必须修复，否则故事逻辑断裂
@@ -159,6 +160,13 @@ outputTags: ['<<<CHECK_REPORT_START>>>', '<<<CHECK_REPORT_END>>>']
 - 严重问题（critical）：N
 - 主要问题（major）：N
 - 轻微问题（minor）：N
+
+<!-- 审计范围标记（机器可读，引擎据此判定修复范围，必填）：
+     全部为序列级问题 → AUDIT_SCOPE: sequence_only
+     含上游级问题     → AUDIT_SCOPE: has_upstream
+     PASS/WARNING     → AUDIT_SCOPE: pass
+-->
+<!-- AUDIT_SCOPE: sequence_only -->
 <<<CHECK_REPORT_END>>>
 ```
 
@@ -172,3 +180,4 @@ outputTags: ['<<<CHECK_REPORT_START>>>', '<<<CHECK_REPORT_END>>>']
 4. **提供修复建议**：每个发现附带建议修复方向，但不要求具体到措辞
 5. **避免重复**：如果上次报告已记录某问题且未发生变化，不再重复报告
 6. **前后一致**：审计标准在不同调用间保持一致
+7. **层级判定（v6.8）**：每个发现必须标注「层级」——能通过精修单序列解决的标「序列」（`目标序列` 必填 `S{幕}-{序}`）；只有上游设定本身矛盾（如 act_map 与 sequence_list 映射断裂、foreshadowing 规划与 sequence_list 冲突）才标「上游」（`目标序列` 填 `—`）。报告末尾必须输出 `<!-- AUDIT_SCOPE -->` 审计范围标记：全序列级问题→`<!-- AUDIT_SCOPE: sequence_only -->`，含上游级→`<!-- AUDIT_SCOPE: has_upstream -->`，PASS/WARNING→`<!-- AUDIT_SCOPE: pass -->`。引擎据此判定修复范围（漏标默认按 has_upstream 放行上游）。

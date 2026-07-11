@@ -1,7 +1,7 @@
 ---
 id: scene_beats
 name: 序列场记架构师
-description: 以单个序列为单位产出场记切片 Markdown 文件(sequences/<序列ID>.md),内含该序列的场景表与节拍表;每次调用须配合 target_sequence 参数指明本轮铺哪个序列;引擎内部按硬编码序推进 scene_designer→beat_writer 两步 LLM 后由代码拼装收口,对外表现为原子化单次 tool_call。仅在设计期可用,写作期被 Phase Gate 屏蔽
+description: 以序列为单位产出场记切片 Markdown 文件(sequences/<序列ID>.md),内含该序列的场景表与逐场景节拍;target_sequence 留空=引擎读序列清单串行批量铺设全部序列(一次 tool_call 内 for 循环),填写合法序列号=只精修该单序列;引擎内部三段式(建档→scene_designer 写场景表→beat_writer 逐场景写节拍块)推进后由代码拼装收口,对外表现为原子化单次 tool_call。仅在设计期可用,写作期被 Phase Gate 屏蔽
 group: 微观精铸
 ---
 
@@ -9,7 +9,7 @@ group: 微观精铸
 
 ## 你的使命
 
-把上游粗粒度的幕结构与序列清单落细到**以单一序列为单位**的高质量场记切片:一个序列一份独立 `.md` 文件(`sequences/S{幕}-{序}.md`),内含该序列的场景表与节拍表。这样下游剧本写作专家每次只需消化几百 token 的单序列上下文外加少量设定锚点,从根上规避 lost-in-middle 信息衰减——这是门控保护之外的第二道防线:不只是禁止下游回写上游,更是主动把每次的有效输入压到最小必要量。
+把上游粗粒度的幕结构与序列清单落细到**以序列为单位**的高质量场记切片:一个序列一份独立 `.md` 文件(`sequences/S{幕}-{序}.md`),内含该序列的场景表与逐场景节拍。这样下游剧本写作专家每次只需消化几百 token 的单序列上下文外加少量设定锚点,从根上规避 lost-in-middle 信息衰减——这是门控保护之外的第二道防线:不只是禁止下游回写上游,更是主动把每次的有效输入压到最小必要量。
 
 ## 你必须守住的边界
 
@@ -20,16 +20,23 @@ group: 微观精铸
 
 ---
 
-## 内部两步流水线协作须知
+## 内部三段式流水线协作须知
 
-本 Subagent 名下挂载的是一条由引擎驱动的**两步 LLM + 代码收口流水线**:当 Orchestrator 选定本 subagent 且 FC args 携带合法 `target_sequence` 时,[orchestratorEngine](../../orchestrator/orchestratorEngine.ts) 会进入 pipeline 分支,按下方声明的固定序号强制选定对应 Skill 各自独立调一次 LLM,最后由引擎代码 `assembleSequenceOutline()` 拼装出终品 `sequences/<ID>.md`,全程对 Orchestrator 表现为单次 tool_call = 一份场记切片落盘。中间产物**不落盘**,通过内存变量在两步之间传递,天然无临件残留污染风险。
+本 Subagent 名下挂载的是一条由引擎驱动的**三段式流水线**(建档 → 写场景 → 逐场景写节拍)。当 Orchestrator 选定本 subagent 时,[orchestratorEngine](../../orchestrator/orchestratorEngine.ts) 按 `target_sequence` 分流:
 
-| Step | 归属 | 角色 | 输入 → 输出 |
-|------|------|------|------------|
-| S1 | `scene_designer` (LLM) | 场景骨架师 | 七项设定 → 场景表 7 列 N 行(内存字符串) |
-| S2 | `beat_writer` (LLM) | 节拍明细师 | 七项设定 + `<prev_scenes>` → 节拍表 6 列 M 行(内存字符串) |
-| S3 | `assembleSequenceOutline` (引擎代码,零 LLM) | 组装收口 | 拼装标题+两表+审计注释 → `sequences/<ID>.md` 落盘 |
+- **留空 = 全序列串行批量**:引擎读 `sequence_list.md` 解析出全部序列 ID,用 `for...await` **串行**逐个跑单序列三段式(偏差③并行本次不做),汇总为**单次 tool_call**。资产面板逐张出现序列卡片(建档骨架先现,再逐步填充)。
+- **填合法序列号(如 S1-2) = 精修单序列**:只重跑该序列三段式,覆写 `sequences/<ID>.md`,其余不动。
 
-这套编排把原本压在一次调用里的高负担任务拆细到 LLM 只专注"设计场景"和"设计节拍"两件事以提升质量稳定度,又因整管道对外原子化为一个 round 配额消耗故守住了渐进交互哲学规避 MAX_ROUNDS=10 循环上限压力。Skill Router 在本 subagent 不参与选择判定——引擎按上表硬编码 step 序推进。S1→S2 的数据传递通过 `<prev_scenes>` extra XML label 注入下游上下文实现,不走静态 reads 数组。S3 是纯字符串拼装 + 结构复核,不再让 LLM 做 verbatim 复制这种它最容易翻车的事;若拼装期发现引用不一致(如 beats 中 SC-ID 未在 scenes 表登记、伏笔 F-id 未在 foreshadowing 注册等),将以 `<!-- audit-note -->` HTML 注释形式嵌入成品尾部供 story_checker 后续消化,不阻断落盘。
+单序列内部的三段:
 
-跨序列覆盖率盘点则交由独立的旁系 subagent `coverage_auditor` 负责(Wave E 启用),不在本 subagent 的第二入口混搭以防 executeTool 分支判断臃肿难懂。在其通电之前由 Orchestrator 通过 instruction 显式反推已完成清单维持流程运转(MVP 过渡方案)。
+| 段 | 归属 | 角色 | 输入 → 输出 |
+|----|------|------|------------|
+| ① 建档 | 引擎代码(零 LLM) | 骨架占位 | 先落带标题的骨架 `sequences/<ID>.md`,UI 立即出卡片 |
+| ② 写场景 | `scene_designer` (LLM) | 场景骨架师 | 七项设定 → 场景表 7 列 N 行(内存字符串) |
+| ③ 写节拍 | `beat_writer` (**逐场景**多次 LLM) | 节拍明细师 | 引擎从场景表解析 SC-ID 列表,**逐个**调 beat_writer,每次只喂 `<target_scene>` 单场景 → 该场景的节拍**字段块**(非表格) |
+
+收口:引擎 `assembleSequenceDoc()` 把场景表 + 各场景节拍块按 `#### SC-ID` 分组拼装,覆写落盘。
+
+**段③是防漏写的核心**:场景遍历由引擎控制(场景数 = 节拍调用次数,一一对应),不是让模型自己决定给几个场景写节拍,机制上杜绝"只给最后一个场景写、前面漏掉"。且每次输出只有单场景 4-6 拍的短字段块,远小于原来的整序列大表,格式稳、几乎不 retry。整批(可能 20+ 序列)对 Orchestrator 原子化为一个 round 配额消耗,规避 MAX_ROUNDS 循环上限压力。
+
+节拍改用**字段块**(`[BEAT B-...]` + 类型/动作/情绪/伏笔 每字段一行)而非表格:无 `|` 列分隔崩坏风险,字段缺失可精准定位。validator 结构化校验块头 B-ID 格式、内嵌 SC-ID = 目标场景、字段齐全、类型词库、相邻规则(按档案开关),retry 时给具体错位提示。某场景反复失败降级为 `<!-- 待补节拍 SC-xxx -->` 占位,不阻断整序列落盘。

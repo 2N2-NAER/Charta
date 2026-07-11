@@ -1,13 +1,16 @@
 import type OpenAI from 'openai'
 import type { SubagentSpec, SkillSpec, ToolResult, DispatchResult, SchedulerState, ExecutionEvent, ExecutionEventCallback, ConversationTurn, AssetFileInfo } from '../types'
+import type { ProductProfile, ProductKind } from '../types/product'
+import { PRODUCT_PROFILES, WRITER_IDS, renderProductProfileXml } from '../types/product'
 import { getSubagent, getAvailableSubagents, buildFunctionSpec, getSkills } from '../skills/skillLoader'
 import { selectSkill } from './skillRouter'
 import { assembleContext, buildAgentPrompt } from './contextAssembler'
-import { validateOutput } from './outputValidator'
-import { checkSceneTable, checkBeatTable } from '../skills/scene_beats/structuralChecks'
+import { validateOutput, extractMultiFileOutput } from './outputValidator'
+import { checkSceneTable, checkBeatBlocks, extractSceneIds, countBeatBlocks } from '../skills/scene_beats/structuralChecks'
 import type { LLMClient } from '../llm/client'
 import type { FileManager } from './fileManager'
 import { usePhaseStore } from '../store/phaseStore'
+import { classifyLLMError } from '../utils/llmError'
 import orchestratorPromptRaw from '../llm/prompts/orchestrator_v5.md?raw'
 
 type ChatCompletionMessageParam = OpenAI.Chat.Completions.ChatCompletionMessageParam
@@ -19,11 +22,32 @@ const MAX_RETRIES = 3
 const MAX_TOOLS_PER_ROUND = 5
 const CONTEXT_LIMIT_CHARS = 22_000 // deepseek-v4-flash 32K 的 ~70%
 
+/** v6.8 全序列并行并发池上限。默认 3（保守防 429）。 */
+const PIPELINE_CONCURRENCY = 3
+
 /** 创作 Subagent ID 列表（用于后处理判断是否需要更新需求状态） */
 const CREATIVE_TOOL_IDS = [
   'worldbuilding', 'characters', 'act_map', 'sequence_list',
   'scene_beats', 'foreshadowing_tracker', 'subplot_manager',
 ]
+
+/** v6.8 审计修复轮受保护的上游设定 Subagent ID（Guard-3a 拦截目标，不含 scene_beats） */
+const UPSTREAM_DESIGN_IDS = [
+  'worldbuilding', 'characters', 'act_map', 'sequence_list',
+  'foreshadowing_tracker', 'subplot_manager',
+]
+
+/**
+ * v6.6 短剧镜头分解规范（仅 short_drama writer 注入为 <shot_breakdown_spec>）。
+ * 短剧 outputAnnotations 含 shot_breakdown，每集末尾输出 SHOT_BREAKDOWN 注释。
+ */
+const SHORT_DRAMA_SHOT_SPEC = [
+  '短剧镜头分解规范（每集产出后于 END TAG 后输出 SHOT_BREAKDOWN 注释）：',
+  '- 注释格式：<!-- SHOT_BREAKDOWN: 景别·主体·情绪功能 | 景别·主体·情绪功能 | ... -->',
+  '- 景别词库：特写 / 近景 / 中景 / 全景 / 远景 / 俯拍 / 仰拍 / 跟拍 / 手持',
+  '- 每集 4-8 个镜头节点，按时间顺序排列，标注景别+主体+情绪功能',
+  '- 镜头节奏服务于脉冲式叙事：钩子集用快切（短镜头多），沉淀集可放慢',
+].join('\n')
 
 /**
  * 前置需求合并指令（v5.5 机制 A）
@@ -37,23 +61,56 @@ const MERGE_INSTRUCTION =
   '无法明确锚定的指代不要臆测。保留所有已有的状态标记（✅/⬜/❌）不变。' +
   '如果用户本轮没有提出任何新需求，原样返回已有的需求文档，不要新增或改写条目。'
 
+/** v6.6：前置归一化指令——把 _input_raw.md 分类为种子资产 */
+const NORMALIZE_INSTRUCTION =
+  '通读 <_input_raw> 全部内容（多文件以 <<< 来源:文件名 >>> 分隔），判定输入类型并归一化为对应种子资产。' +
+  '按 <product_profile> 的层语义组织；既有种子资产非空时增量合并不覆盖；只产出有信号的文件块，不凑数。'
+
 
 // ===== v6.1 动态写靶协议扩展（resolveWriteTarget / resolveExtraContext）=====
 
 /**
  * 目标标识符合法性护栏：
- * 主层级 S{幕}-{序} 如 S1-1；细粒度子级 SC-{seq}-{nn} 如 SC-S1-1-01。
+ * 主层级 S{幕}-{序} 如 S1-1；细粒度子级 SC-{seq}-{nn} 如 SC-S1-1-01；
+ * 集级 S{幕}-{序}-{n} 如 S1-1-03（短剧一序列多集时 Orche 可能传，由 normalizeToSequenceId 归约）。
+ * v6.6：后缀放宽 -\d{2} → -\d{1,2}，兼容一位集号；不收紧拒收，归约兜底规避写死风险。
  */
-const TARGET_ID_REGEX = /^[A-Z]\d+-\d+(?:-\d{2})?$/
+const TARGET_ID_REGEX = /^[A-Z]\d+-\d+(?:-\d{1,2})?$/
 
 /**
- * 从细粒度场景号反推所属序列 ID（script_writer 定位上游 sequence beats 文件用）
+ * 从细粒度标识符反推所属序列 ID（成文 writer 定位上游 sequence beats 文件、
+ * 落盘 chapters 路径统一用序列级 ID）。
  *
- * 例：SC-S1-1-02 → S1-1 ；S2-3 → S2-3（已为主层级原样返回）。
+ * v6.6：短剧一序列多集，Orchestrator 可能传集级 ID（如 S1-1-03）指代"第3集"。
+ * 若不归约，会落成 chapters/S1-1-03.md（每集一个文件）且读错 sequences/S1-1-03.md
+ * （实际场记是 sequences/S1-1.md）。此处把集级 ID 归约到序列级，保证整序列多集
+ * 追加到同一 chapters/<序列ID>.md——归约兜底而非拒收，规避"格式偏差导致无法输出"。
+ *
+ * 例：SC-S1-1-02 → S1-1（场景号）；S1-1-03 → S1-1（集级 ID）；S2-3 → S2-3（已序列级）。
  */
 function normalizeToSequenceId(target: string): string {
-  const m = /^SC-([A-Z]\d+-\d+)/.exec(target)
-  return m ? m[1] : target
+  // SC-S1-1-02 → S1-1（场景号反推）
+  const sc = /^SC-([A-Z]\d+-\d+)/.exec(target)
+  if (sc) return sc[1]
+  // S1-1-03 → S1-1（集级 ID 反推序列；短剧一序列多集时 Orche 可能传集号）
+  const ep = /^([A-Z]\d+-\d+)-\d+$/.exec(target)
+  if (ep) return ep[1]
+  return target
+}
+
+/**
+ * v6.6：将序列 ID 折算为线性序号，供伏笔寿命裁剪做距离比较。
+ *
+ * S{幕}-{序} → 幕×100 + 序（如 S1-1→101、S2-3→203）；非匹配格式返回 0。
+ * 粗粒度仅用于"是否超寿命"的远近距离判断，不要求精确可序。
+ */
+function seqOrdinal(seqId: string): number {
+  const m = /^S?([A-Z])\d*?-?(\d+)-(\d+)/.exec(seqId)
+  if (!m) return 0
+  const act = Math.max(1, m[1].charCodeAt(0) - 64) // A→1, B→2 ...
+  const seq = parseInt(m[2], 10)
+  const sub = parseInt(m[3], 10)
+  return act * 10000 + seq * 100 + sub
 }
 
 interface ExtraLabelEntry {
@@ -80,12 +137,12 @@ async function safeRead(fm: FileManager, path: string): Promise<string> {
   }
 }
 
-// ===== v6.2 Scene Beats 两步流水线注册表（PIPELINE_REGISTRY）=====
+// ===== v6.7 Scene Beats 三段式流水线注册表（PIPELINE_REGISTRY）=====
 //
 // 当某 Subagent 出现在此注册表中，executeTool 会绕开 Skill Router 多选机制，
-// 按 steps 固定序强制选定各 step.skillId 各自跑一次 LLM call，
-// 最后由引擎代码 assembleSequenceOutline() 拼装成品落盘 sequences/<ID>.md。
-// 中间产物**不落盘**，通过 runPipeline 内的内存变量在两步之间传递，天然幂等无临件残留。
+// 走三段式流水线：① 建档（引擎零 LLM）② 场景表（sceneStep）③ 逐场景节拍（beatStep 循环）。
+// 空靶 = runBatchPipeline 读 sequence_list 串行铺全部序列；合法靶 = runSequencePipeline 精修单序列。
+// 中间产物（场景表）**不落盘**，通过内存变量在段间传递；最终 assembleSequenceDoc 拼装落盘。
 // 对 Orche 表现为单个 round 配额消耗的一次 tool_call。
 //
 // 所有 pipeline 元信息均集中在引擎侧此常量内嵌声明：types/index.ts 与 frontmatter parser 维持不变。
@@ -98,40 +155,35 @@ interface PipeStepDef {
 }
 
 interface PipeRegistryValue {
-  steps: PipeStepDef[]
+  /** 段②：写场景表 */
+  sceneStep: PipeStepDef
+  /** 段③：逐场景循环写节拍块 */
+  beatStep: PipeStepDef
 }
 
 const PIPELINE_REGISTRY: Record<string, PipeRegistryValue> = {
   scene_beats: {
-    steps: [
-      { skillId: 'scene_designer', label: 'prev_scenes' },
-      { skillId: 'beat_writer',    label: 'prev_beats' },
-      // S3 assemble 不在 steps 里——由 runPipeline 收尾时直接调 assembleSequenceOutline() 引擎函数
-    ],
+    sceneStep: { skillId: 'scene_designer', label: 'prev_scenes' },
+    beatStep: { skillId: 'beat_writer', label: 'target_scene' },
   },
 }
+// 建档段①是纯引擎代码，无 skill，不进注册表。
+// 不新增 PIPELINE_CONCURRENCY——偏差 ③（并行）本次不做，runBatchPipeline 走串行 for...await。
 
 /**
- * v6.2 为 pipeline step 动态构造 structuralCheck 钩子。
+ * v6.6：极简表格数据行计数——数 `|` 起始且 `|` 结尾的行，去掉表头与分隔行。
  *
- * checkBeatTable 需要跨步依赖 scenesMd 作 SC-ID 集合参照,故必须在 runPipeline 内
- * 按 skillId + 前置产出 快照 构造 closure,无法在 skillLoader 静态注册。
- *
- * @param skillId 当前 pipeline step 的 skill id
- * @param scenesMd 上一步 scene_designer 的场景表内存字符串(供 beat_writer 校验用)
- * @returns 挂载到 SkillSpec.structuralCheck 的钩子;非 scene_beats pipeline step 返回 undefined
+ * 仅供 runPipelineSoftValidation 做"量级越界"非阻塞软校验用；不替代 structuralChecks
+ * 内的 parseMarkdownTable（后者承担列数/ID 等阻塞校验，逻辑更严）。
  */
-function buildStructuralCheckForStep(
-  skillId: string,
-  scenesMd: string | undefined,
-): SkillSpec['structuralCheck'] {
-  if (skillId === 'scene_designer') {
-    return (extracted: string) => checkSceneTable(extracted)
-  }
-  if (skillId === 'beat_writer') {
-    return (extracted: string) => checkBeatTable(extracted, scenesMd)
-  }
-  return undefined
+function countTableDataRows(md: string): number {
+  const lines = md
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('|') && l.endsWith('|'))
+  if (lines.length < 2) return Math.max(0, lines.length)
+  // 第 2 行是分隔行（|---|---|），剔除；第 1 行是表头，剔除
+  return lines.length - 2
 }
 
 // ===== v6.3 拼接聚合标签辅助函数（守 INV-2：不侵入 assembleContext 本体）=====
@@ -196,55 +248,42 @@ function buildAggregatedXml(
 	return `\n\n<${aggregatedLabel}>\n${inner}\n</${aggregatedLabel}>`
 }
 
-// ===== v6.2 Scene Beats 引擎代码收口(S3)=====
-
-/** 提取 markdown 表格首行到尾行的连续块(去除表头前的空行与表尾后的说明段)。 */
-function extractTableBlock(md: string): string {
-  const lines = md.split(/\r?\n/)
-  const table: string[] = []
-  let inTable = false
-  for (const raw of lines) {
-    const line = raw.trim()
-    if (line.startsWith('|') && line.endsWith('|')) {
-      table.push(line)
-      inTable = true
-    } else if (inTable) {
-      break
-    }
-  }
-  return table.join('\n')
-}
+// ===== v6.7 Scene Beats 引擎代码收口 =====
 
 /**
- * v6.2 S3:两步 LLM 完成后由引擎代码拼装 sequences/<target>.md 最终成品(零 LLM 调用)。
+ * v6.7 收口：三段式完成后由引擎代码拼装 sequences/<seqId>.md 最终成品（零 LLM 调用）。
  *
- * 职责三项:
- *   1. 从 scenesMd / beatsMd(已经过 validator 结构化校验)中抽出表格块(丢弃可能的前置说明段);
- *   2. 按固定模板拼装 # 标题 + 场景表 + 节拍表,外层包上 SCENE_BEAT_OUTLINE 复合 tag
- *      复用下游 script_writer 的 <current_sequence_beats> 契约(v6.1 已确立);
- *   3. 由于 LLM 输出已经过 checkSceneTable/checkBeatTable 双重结构校验,拼装期不再做
- *      额外一致性心算——真正的引用完整性/词库合规性已在 validator 阶段拦下。
+ * 场景表仍是表格直接 trim；节拍段按场景用 `#### <SC-ID>` 分组，每组内是 beat_writer 产出的
+ * `[BEAT ...]` 字段块。外层 `<<<SCENE_BEAT_OUTLINE_START/END>>>` + `# <seqId>` 标题保留不变
+ * → 下游四 writer 的 `<current_sequence_beats>` 纯文本注入契约不破。
  *
- * @param target 目标序列 ID 如 'S1-1'
- * @param scenesMd scene_designer 输出的场景表(不含 START/END TAG)
- * @param beatsMd beat_writer 输出的节拍表(不含 START/END TAG)
- * @returns 最终 sequences/<target>.md 的完整内容(含外层 SCENE_BEAT_OUTLINE TAG)
+ * @param seqId 目标序列 ID 如 'S1-1'
+ * @param scenesMd scene_designer 输出的场景表（不含 START/END TAG）
+ * @param sceneIds 场景表解析出的有序 SC-ID 列表
+ * @param beatBySc Map<SC-ID, 节拍块 md>（失败场景为占位注释）
+ * @returns 最终 sequences/<seqId>.md 的完整内容（含外层 TAG）
  */
-function assembleSequenceOutline(target: string, scenesMd: string, beatsMd: string): string {
-  const scenesTable = extractTableBlock(scenesMd) || scenesMd.trim()
-  const beatsTable = extractTableBlock(beatsMd) || beatsMd.trim()
-
+function assembleSequenceDoc(
+  seqId: string,
+  scenesMd: string,
+  sceneIds: string[],
+  beatBySc: Map<string, string>,
+): string {
+  const scenesTable = scenesMd.trim() // 场景仍是表格，直接 trim
+  const beatSections = sceneIds
+    .map((sc) => `#### ${sc}\n\n${(beatBySc.get(sc) ?? '').trim()}`)
+    .join('\n\n')
   return [
     '<<<SCENE_BEAT_OUTLINE_START>>>',
-    `# ${target}`,
+    `# ${seqId}`,
     '',
     '### 场景表',
     '',
     scenesTable,
     '',
-    '### 节拍表',
+    '### 节拍',
     '',
-    beatsTable,
+    beatSections,
     '<<<SCENE_BEAT_OUTLINE_END>>>',
   ].join('\n')
 }
@@ -327,9 +366,79 @@ export class OrchestratorEngine {
   /** v6.4 角色行为追踪：key=target_chapter，值=该章中提取的 BEHAVIOR_TRACK 注释列表 */
   private behaviorTrack: Map<string, string[]> = new Map()
 
+  /**
+   * v6.6 伏笔运行时状态：key=F-id，值={planted, paidoff, atChapter}。
+   * 从四 writer 输出的 `<!-- FORESHADOW: F-id=plant|payoff@章节id -->` 注释提取，
+   * 注入 `<foreshadowing_state>` 供下游 writer 防重复 plant / 提前 payoff。
+   * 按 foreshadowingMaxLifespan 裁剪过期项。
+   */
+  private foreshadowingState: Map<string, { planted: boolean; paidoff: boolean; atChapter: string }> = new Map()
+
+  /**
+   * v6.6 批次断点：key=sequenceId，值={lastUnit, done}。
+   * 短剧/长剧按分段续写时记录已完成单元数，支持跨对话轮断点续写。
+   */
+  private batchProgress: Map<string, { lastUnit: number; done: boolean }> = new Map()
+
+  /**
+   * v6.6 产品档案锁：会话级锁定不可变，由 UI 产品选择器经 lockProfile() 落定。
+   * null = 未选产品（Guard-0：设计区+成文区全禁，仅 reset_all 可用）。
+   * 解锁仅 reset_all（清资产同时释放 profileLock）。
+   */
+  private profileLock: ProductProfile | null = null
+
+  /** v6.8 审计修复状态：story_checker 报 FAIL 时置 true，PASS/WARNING 或漏标置 false */
+  private auditFixMode = false
+  /** v6.8 审计范围：checker 标 sequence_only 时设，否则 null（漏标默认放行上游） */
+  private auditScope: 'sequence_only' | null = null
+
   constructor(llm: LLMClient, fileManager: FileManager) {
     this.llm = llm
     this.fileManager = fileManager
+  }
+
+  // ===== v6.6 产品档案锁 =====
+
+  /**
+   * UI 产品选择器落定产品档案（会话级锁定不可变）。
+   * 必须在任何 sendMessage 之前调用——设计区/成文区的结构参数全部自此派生。
+   */
+  lockProfile(kind: ProductKind): void {
+    this.profileLock = PRODUCT_PROFILES[kind]
+  }
+
+  /**
+   * 释放产品锁，回到未选产品态。仅 reset_all 调用（清资产同时清锁，可重选产品）。
+   */
+  clearProfileLock(): void {
+    this.profileLock = null
+  }
+
+  /** 查询当前产品档案（UI 展示 / 注入判定用）*/
+  getProfile(): ProductProfile | null {
+    return this.profileLock
+  }
+
+  /**
+   * v6.6：用户投喂文件落到 `_input_raw.md`（input_normalizer 的生产端）。
+   *
+   * 单文件直写、多文件追加合并——以 `<<< 来源:文件名 >>>` 分隔标记来源，
+   * 便于归一化时区分不同投喂物。归一化产出种子资产后引擎不清空本文件，
+   * 由 processUserInput 检测"未归一化"状态决定是否强制先跑 input_normalizer。
+   */
+  async appendInputRaw(filename: string, content: string): Promise<void> {
+    const path = '_input_raw.md'
+    const existing = await safeRead(this.fileManager, path)
+    const block = `<<< 来源:${filename} >>>\n${content}`
+    const next = existing.length > 0 ? `${existing}\n\n${block}` : block
+    await this.fileManager.writeFile(path, next)
+  }
+
+  /**
+   * v6.6：归一化完成后清空 `_input_raw.md`（标记已消费，避免下轮重复归一化）。
+   */
+  async clearInputRaw(): Promise<void> {
+    await this.fileManager.writeFile('_input_raw.md', '')
   }
 
   /** 发射执行事件 */
@@ -346,8 +455,9 @@ export class OrchestratorEngine {
    * v6.1 扩展点：
    *   - 第 4 可选参 options.target 承载 FC args.target_{sequence|chapter}，由 processUserInput
    *     dispatch loop 解析 JSON arguments 后透传进来。
-   *   - 若 subagent 注册于 PIPELINE_REGISTRY 则走纵切多步管道（runPipeline）对 Orche 原子化为一次 tool_call；
-   *     否则按原有单 Skill 直发流程，其中 script_writer 经 resolveWriteTarget 计算 effectiveWrites
+   *   - 若 subagent 注册于 PIPELINE_REGISTRY 则走三段式管道（空靶 runBatchPipeline 全量串行批量 /
+   *     带靶 runSequencePipeline 精修单序列）对 Orche 原子化为一次 tool_call；
+   *     否则按原有单 Skill 直发流程，其中成文 writer 经 resolveWriteTarget 计算 effectiveWrites
    *     替换 placeholder 并同步喂读 <current_draft>/<current_sequence_beats>/<current_target>
    *     触发 create/refine 双模自判定。validator 业务一行未改（INV-1）。
    *
@@ -360,13 +470,31 @@ export class OrchestratorEngine {
     history?: ConversationTurn[],
     options?: { target?: string },
   ): Promise<ToolResult> {
-    // ===== v6.1 Guard-2: Phase Gate dispatch 兜底拦截（Guard-1 已做 FC 面裁剪此处双保险防线）=====
-    // 即便未来某段逻辑漏过可见性筛选仍在此处硬拦下违规跨阶段调用并 push 友好错误反馈供 Orche 自纠转向。
+    // ===== v6.6 Guard 体系（FC 面 Guard-0/1 已裁剪，此处双保险兜底）=====
+    //  - Guard-0：未选产品(profileLock=null)时除 reset_all 外全拦
+    //  - Guard-2：写作期屏蔽设计区 + story_checker + 非本产品 writer；设计期屏蔽全部 writer
     const psGuard = usePhaseStore.getState()
+    if (this.profileLock === null && subagent.id !== 'reset_all') {
+      this.emit('tool_error', {
+        toolId: subagent.id,
+        toolName: subagent.name,
+        message: `${subagent.name} 暂不可用：尚未选择产品方向`,
+      })
+      return {
+        success: false,
+        error: `${subagent.name} 暂不可用，请引导用户先在顶部选择产品方向（小说/剧本/长剧/短剧）`,
+        skillName: subagent.name,
+      }
+    }
     if (psGuard.isWriting()) {
+      const isOtherWriter =
+        this.profileLock != null &&
+        WRITER_IDS.includes(subagent.id) &&
+        subagent.id !== this.profileLock.writerSubagentId
       if (
         CREATIVE_TOOL_IDS.includes(subagent.id) ||
-        subagent.id === 'story_checker'
+        subagent.id === 'story_checker' ||
+        isOtherWriter
       ) {
         this.emit('tool_error', {
           toolId: subagent.id,
@@ -379,11 +507,11 @@ export class OrchestratorEngine {
           skillName: subagent.name,
         }
       }
-    } else if (subagent.id === 'script_writer') {
+    } else if (WRITER_IDS.includes(subagent.id)) {
       this.emit('tool_error', {
         toolId: subagent.id,
         toolName: subagent.name,
-        message: `${subagent.name} 仅在写作期可用，请先点🔒锁定大纲再发起章节创作`,
+        message: `${subagent.name} 仅在写作期可用，请先点🔒锁定大纲再发起正文创作`,
       })
       return {
         success: false,
@@ -394,25 +522,64 @@ export class OrchestratorEngine {
 
     const target = options?.target?.trim() ?? ''
 
-    // ===== v6.1 Pipeline Registry 分流（scene_beats 四步纵切主路）=====
+    // ===== v6.8 Guard-3a：审计修复轮仅序列级问题时，拦截上游设定工具（dispatch 兜底）=====
+    if (this.auditFixMode && this.auditScope === 'sequence_only' && UPSTREAM_DESIGN_IDS.includes(subagent.id)) {
+      this.emit('tool_error', {
+        toolId: subagent.id,
+        toolName: subagent.name,
+        message: `${subagent.name} 受审计修复约束：本轮仅序列级问题，不得修改上游设定文件`,
+      })
+      return {
+        success: false,
+        skillName: subagent.name,
+        error: '审计修复轮仅序列级问题，不得修改上游指导文件（worldbuilding/characters/act_map/sequence_list/foreshadowing/subplots）',
+      }
+    }
+
+    // ===== v6.7 Pipeline Registry 分流（scene_beats 三段式：空靶批量 / 带靶精修）=====
     const pipeReg = PIPELINE_REGISTRY[subagent.id]
     if (pipeReg !== undefined) {
-      if (!target || !TARGET_ID_REGEX.test(target)) {
+      // ===== v6.8 Guard-3b：审计修复轮 scene_beats 必须带靶，禁止空靶全量覆写 =====
+      if (this.auditFixMode && subagent.id === 'scene_beats' && !target) {
         this.emit('tool_error', {
           toolId: subagent.id,
           toolName: subagent.name,
-          message: `${subagent.name} 必须提供合法格式的 target_sequence（形如 S1-1）；缺值或非法将拒绝下沉给模型`,
+          message: '审计修复轮禁止空靶全量覆写，必须带 target_sequence 精修出错序列',
         })
         return {
           success: false,
-          error: `必须提供合法格式的 target_sequence 以驱动 ${subagent.name} 流水线`,
+          skillName: subagent.name,
+          error: '审计修复轮必须带 target_sequence 精修单序列，禁止空靶全量覆写',
+        }
+      }
+      if (!target) {
+        // 空靶 = 全量批量（v6.8 并发池）
+        return this.runBatchPipeline(subagent, pipeReg, instruction, history)
+      }
+      if (!TARGET_ID_REGEX.test(target)) {
+        // 有值但非法 → 仍早退（避免误写）
+        this.emit('tool_error', {
+          toolId: subagent.id,
+          toolName: subagent.name,
+          message: `${subagent.name} 的 target_sequence 格式非法（形如 S1-1）；留空=全量批量，填写=精修单序列`,
+        })
+        return {
+          success: false,
+          error: `target_sequence 格式非法：${target}`,
           skillName: subagent.name,
         }
       }
-      return this.runPipeline(subagent, pipeReg, target, instruction, history)
+      // 合法靶（归约后）= 精修单序列
+      return this.runSequencePipeline(
+        subagent,
+        pipeReg,
+        normalizeToSequenceId(target),
+        instruction,
+        history,
+      )
     }
 
-    // ===== 单 Skill 直发路径（含 script_writer 的 resolveWriteTarget 协议扩展）=====
+    // ===== 单 Skill 直发路径（含成文 writer 的 resolveWriteTarget 协议扩展）=====
     // ① Skill Router：在该 Subagent 名下选出最合适的 Skill
     //    单 Skill 时零成本直选、不调 LLM；≥2 candidate 时按 when/description 打分择优
     const skill = selectSkill(subagent.id, instruction)
@@ -422,6 +589,11 @@ export class OrchestratorEngine {
       await this.fileManager.clearAll()
       // v6.4：清空行为追踪
       this.behaviorTrack.clear()
+      // v6.6：清空运行时记忆
+      this.foreshadowingState.clear()
+      this.batchProgress.clear()
+      // v6.6：释放产品档案锁，回到未选产品态（可重选产品）
+      this.clearProfileLock()
       // v6.1 F.4：reset_all 触发时同步把 phase 打回 designing、清空 baselines，
       // 保证状态机一致归零（clearAll 已删光 chapters/_seq 等全部内容故无需额外清理这些产物路径）。
       usePhaseStore.getState().reset()
@@ -456,9 +628,10 @@ export class OrchestratorEngine {
     // ④ System Prompt：角色前缀 + Skill 正文
     const systemPrompt = skill.preamble ? `${skill.preamble}\n\n${skill.body}` : skill.body
 
-    // ⑤ v6.1 resolveWriteTarget：scene_beats 已被上方管道截走，此处仅需处理 script_writer 章节 靶
+    // ⑤ v6.1 resolveWriteTarget：scene_beats 已被上方管道截走，此处仅需处理成文 writer 章节 靶
     let effectiveWrites = skill.writes
-    if (subagent.id === 'script_writer') {
+    let currentDraft = '' // v6.9 fix: 提升作用域，供落盘追加模式与 updateBatchProgress 复用
+    if (WRITER_IDS.includes(subagent.id)) {
       if (!target || !TARGET_ID_REGEX.test(target)) {
         this.emit('tool_error', {
           toolId: subagent.id,
@@ -471,18 +644,17 @@ export class OrchestratorEngine {
           skillName: subagent.name,
         }
       }
-      const resolvedPath = `chapters/${target}.md`
+      // v6.6：落盘统一用归约后的序列级 ID——短剧一序列多集时，即便 Orche 传集级
+      //       target（如 S1-1-03），也归约到 S1-1 落 chapters/S1-1.md，整序列多集追加到同一文件。
+      const seqId = normalizeToSequenceId(target)
+      const resolvedPath = `chapters/${seqId}.md`
       effectiveWrites = [resolvedPath, ...skill.writes.slice(1)]
 
       // resolveExtraContext：注入既存草稿 + 同幕全部序列 + 前章正文，触发 create/refine 双模自判定
-      const currentDraft = await safeRead(this.fileManager, resolvedPath)
-      const seqBeatsDoc = await safeRead(
-        this.fileManager,
-        `sequences/${normalizeToSequenceId(target)}.md`,
-      )
+      currentDraft = await safeRead(this.fileManager, resolvedPath)
+      const seqBeatsDoc = await safeRead(this.fileManager, `sequences/${seqId}.md`)
 
       // v6.4：同幕全部序列（按幕号聚合，替代旧 ±1 相邻序列）
-      const seqId = normalizeToSequenceId(target)
       const actPrefix = seqId.replace(/-\d+$/, '')
       const seqPaths = allPaths
         .filter(a => a.path.startsWith('sequences/') && a.path.endsWith('.md') && a.exists)
@@ -516,6 +688,15 @@ export class OrchestratorEngine {
         .map(([ch, items]) => `<chapter id="${ch}">\n${items.map(i => `  - ${i}`).join('\n')}\n</chapter>`)
         .join('\n\n')
 
+      // v6.6：注入产品档案（writer 据此获知成文单元/叙事密度/心理描写开关/节拍词库等）；
+      //       短剧额外注入镜头分解规范。
+      const profileXml = this.profileLock ? renderProductProfileXml(this.profileLock) : ''
+      const shotSpec = this.profileLock?.kind === 'short_drama' ? SHORT_DRAMA_SHOT_SPEC : ''
+
+      // v6.6：伏笔运行时状态 + 批次断点（防重复 plant / 提前 payoff，支持分段续写）
+      const foreshadowStateXml = this.renderForeshadowingStateXml()
+      const batchProgressXml = this.renderBatchProgressXml()
+
       context = appendExtraLabels(context, [
         { label: 'current_draft', content: currentDraft },
         { label: 'current_target', content: currentDraft },
@@ -523,6 +704,18 @@ export class OrchestratorEngine {
         { label: 'same_act_sequences', content: sameActXml },
         { label: 'previous_chapter_draft', content: prevChapterDoc },
         { label: 'character_behavior_tracking', content: behaviorTrackingSummary },
+        { label: 'product_profile', content: profileXml },
+        { label: 'shot_breakdown_spec', content: shotSpec },
+        { label: 'foreshadowing_state', content: foreshadowStateXml },
+        { label: 'batch_progress', content: batchProgressXml },
+      ])
+    } else if (this.profileLock) {
+      // v6.6 设计区档案化：非 writer 的设计区 Subagent（act_map/sequence_list/
+      //   foreshadowing_tracker/subplot_manager 等）同样注入 <product_profile>，
+      //   供其 SKILL body 去硬编码后按档案取幕/序/场/拍区间与节拍词库、伏笔寿命。
+      //   Guard-0 已保证此处 profileLock 必非 null（reset_all 早已 return）。
+      context = appendExtraLabels(context, [
+        { label: 'product_profile', content: renderProductProfileXml(this.profileLock) },
       ])
     }
 
@@ -532,38 +725,56 @@ export class OrchestratorEngine {
     // specView 仅供 validateOutput 取 outputTags + effectiveWrites[0]，validator 业务零改（INV-1）
     const specView: SkillSpec = { ...skill, writes: effectiveWrites }
 
+    // v6.6：input_normalizer 走多文件提取分支（独立于 validateOutput 主体，守 INV-1 边缘）
+    const isNormalizer = subagent.id === 'input_normalizer'
+
     // ⑦ 调用 LLM + 校验（最多 3 次重试）
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
         const output = await this.llm.sendMessage(systemPrompt, userContent)
-        const validation = validateOutput(output, specView)
+        const validation = isNormalizer
+          ? extractMultiFileOutput(output, specView)
+          : validateOutput(output, specView)
 
         if (validation.valid) {
+          let writerContent = '' // v6.9 fix: 提升到 if 块作用域，供 updateBatchProgress 算累积集数
           for (const [file, content] of Object.entries(validation.extracted)) {
-            await this.fileManager.writeFile(file, content)
+            // v6.9 fix: 分段续写产品(短剧按集/长剧按场景)由引擎追加本单元到既有草稿，
+            // 不依赖 writer 回填历史——避免 LLM 偶发不回填致历史集丢失覆写。
+            const splitUnit = this.profileLock?.proseSplitUnit ?? 'none'
+            const isAppendMode =
+              WRITER_IDS.includes(subagent.id) && splitUnit !== 'none' && currentDraft.length > 0
+            writerContent = isAppendMode ? `${currentDraft}\n\n${content}` : content
+            await this.fileManager.writeFile(file, writerContent)
           }
 
-          // v6.4：行为追踪提取 + 软校验
-          if (subagent.id === 'script_writer') {
+          // v6.6：归一化成功后清空 _input_raw.md（标记已消费，避免下轮重复归一化）
+          if (isNormalizer) {
+            await this.clearInputRaw()
+            return {
+              success: true,
+              writes: Object.keys(validation.extracted),
+              output,
+              skillId: skill.skillId,
+              skillName: skill.name,
+            }
+          }
+
+          // v6.4：行为追踪提取 + 软校验；v6.6：warnings 统一交由 processUserInput
+          //       的 tool_complete 透传（与 scene_beats Pipeline 数量软校验同路径）
+          // v6.6：同步提取伏笔状态 + 批次断点（写入运行时记忆供下次调用注入）
+          if (WRITER_IDS.includes(subagent.id)) {
             this.extractBehaviorTrack(target, output)
+            this.extractForeshadowingState(target, output)
+            this.updateBatchProgress(target, writerContent)
             const softWarnings = this.runSoftValidation(output)
-            if (softWarnings.length > 0) {
-              this.emit('tool_complete', {
-                toolId: subagent.id,
-                toolName: subagent.name,
-                skillId: skill.skillId,
-                skillName: skill.name,
-                writes: Object.keys(validation.extracted),
-                message: `${subagent.name} 完成（含 ${softWarnings.length} 条写作建议）`,
-              })
-              return {
-                success: true,
-                writes: Object.keys(validation.extracted),
-                output,
-                skillId: skill.skillId,
-                skillName: skill.name,
-                warnings: softWarnings,
-              }
+            return {
+              success: true,
+              writes: Object.keys(validation.extracted),
+              output,
+              skillId: skill.skillId,
+              skillName: skill.name,
+              warnings: softWarnings.length > 0 ? softWarnings : undefined,
             }
           }
 
@@ -605,7 +816,8 @@ export class OrchestratorEngine {
   }
 
   /**
-   * v6.4：从 script_writer 输出中提取角色行为追踪注释。
+   * v6.4：从 writer 输出中提取角色行为追踪注释。
+   * v6.6：LRU 上限从硬编码 5 改为 profileLock.behaviorTrackWindow（小说 8/剧本 8/长剧 12/短剧 20）。
    */
   private extractBehaviorTrack(target: string, output: string): void {
     const regex = /<!--\s*BEHAVIOR_TRACK:\s*(.+?)\s*-->/g
@@ -618,12 +830,92 @@ export class OrchestratorEngine {
       // 先删再插，保证 LRU 语义正确（Map.set 不改变已有 key 的插入位置）
       this.behaviorTrack.delete(target)
       this.behaviorTrack.set(target, tracks)
-      // 最多保留 5 章追踪记录
-      while (this.behaviorTrack.size > 5) {
+      // 上限取产品档案窗口（不复用 foreshadowingMaxLifespan——语义不同）
+      const window = this.profileLock?.behaviorTrackWindow ?? 8
+      while (this.behaviorTrack.size > window) {
         const oldest = this.behaviorTrack.keys().next().value
         if (oldest) this.behaviorTrack.delete(oldest)
       }
     }
+  }
+
+  /**
+   * v6.6：从 writer 输出提取伏笔运行时状态。
+   *
+   * 解析 `<!-- FORESHADOW: F-id=plant@章节id -->` / `payoff@章节id`，更新 foreshadowingState：
+   *   - plant → 标记 planted=true，记录 atChapter
+   *   - payoff → 标记 paidoff=true
+   * 随后按 foreshadowingMaxLifespan 裁剪：与最新章节序距超过寿命的已 resolved 项剔除。
+   */
+  private extractForeshadowingState(target: string, output: string): void {
+    const regex = /<!--\s*FORESHADOW:\s*(F-[\w-]+)\s*=\s*(plant|payoff)\s*@\s*([\w-]+)\s*-->/g
+    let match: RegExpExecArray | null
+    const latestOrd = seqOrdinal(normalizeToSequenceId(target))
+    while ((match = regex.exec(output)) !== null) {
+      const [, fId, action, atChapter] = match
+      const entry = this.foreshadowingState.get(fId) ?? { planted: false, paidoff: false, atChapter }
+      if (action === 'plant') {
+        entry.planted = true
+        entry.atChapter = atChapter
+      } else {
+        entry.paidoff = true
+      }
+      this.foreshadowingState.set(fId, entry)
+    }
+    // 按 lifespan 裁剪：已回收且距最新章节超寿命的伏笔移除（不再有用）
+    const lifespan = this.profileLock?.foreshadowingMaxLifespan ?? 20
+    for (const [fId, entry] of this.foreshadowingState) {
+      if (entry.paidoff && Math.abs(seqOrdinal(normalizeToSequenceId(entry.atChapter)) - latestOrd) > lifespan) {
+        this.foreshadowingState.delete(fId)
+      }
+    }
+  }
+
+  /**
+   * v6.6：更新批次断点进度。
+   *
+   * 短剧/长剧（proseSplitUnit != 'none'）按分段续写：从累积后草稿中数 `## 第N集`
+   * 单元数记录 lastUnit；非分段产品落 done=true。
+   * v6.9 fix: 改基于累积后内容(accumulatedDraft)算 lastUnit，而非 writer 本次 output——
+   *   writer 现只输出本单元，output 仅 1 集，旧逻辑会恒记 lastUnit=1。
+   */
+  private updateBatchProgress(target: string, accumulatedDraft: string): void {
+    const seqId = normalizeToSequenceId(target)
+    const splitUnit = this.profileLock?.proseSplitUnit ?? 'none'
+    if (splitUnit === 'none') {
+      this.batchProgress.set(seqId, { lastUnit: 0, done: true })
+      return
+    }
+    // 短剧/长剧数累积后草稿的 `## 第N集` 单元数
+    const unitMatches = accumulatedDraft.match(/##\s*第\s*\d+\s*集/g)
+    const lastUnit = unitMatches ? unitMatches.length : 0
+    this.batchProgress.set(seqId, { lastUnit, done: false })
+  }
+
+  /**
+   * v6.6：将 foreshadowingState 渲染为 `<foreshadowing_state>` XML 注入 writer 上下文。
+   * 空状态返回空串（appendExtraLabels 自动过滤）。
+   */
+  private renderForeshadowingStateXml(): string {
+    if (this.foreshadowingState.size === 0) return ''
+    const lines = [...this.foreshadowingState.entries()].map(
+      ([fId, st]) =>
+        `  <foreshadow id="${fId}" planted="${st.planted}" paidoff="${st.paidoff}" at="${st.atChapter}"/>`,
+    )
+    return `<foreshadowing_state>\n${lines.join('\n')}\n</foreshadowing_state>`
+  }
+
+  /**
+   * v6.6：将 batchProgress 渲染为 `<batch_progress>` XML 注入 writer 上下文。
+   * 空状态返回空串。供分段续写时感知本序列已产单元数。
+   */
+  private renderBatchProgressXml(): string {
+    if (this.batchProgress.size === 0) return ''
+    const lines = [...this.batchProgress.entries()].map(
+      ([seqId, st]) =>
+        `  <sequence id="${seqId}" lastUnit="${st.lastUnit}" done="${st.done}"/>`,
+    )
+    return `<batch_progress>\n${lines.join('\n')}\n</batch_progress>`
   }
 
   /**
@@ -657,161 +949,329 @@ export class OrchestratorEngine {
   }
 
   /**
-   * v6.2 两步流水线 Runner（PIPELINE_REGISTRY 注册者专享私有方法）
+   * v6.7：scene_beats Pipeline 数量软校验——场景数 / 平均每场景节拍数越出档案区间时
+   * 产出非阻塞 warning。与 runSoftValidation 同为非阻塞提示，不触发 retry。
    *
-   * 按 pipe.steps 固定序依次强制选定各 step.skillId（绕开 Router 打分），每 step 各跑
-   * ≤MAX_RETRIES 次 LLM + validateOutput，中间产物**不落盘**通过内存字符串传递到下一步的
-   * `<prev_*>` XML 标签；全部 LLM 步骤成功后由引擎代码 assembleSequenceOutline() 拼装
-   * 最终成品并 writeFile 到 sequences/<ID>.md 一次落盘完成整体交付。
-   *
-   * 任一 LLM 步失败即整体 abort 返回 ToolResult.success=false.error 含中断位点指示，
-   * Orchestrator 收到错误反馈自行决定下一步转向。
-   *
-   * 数据传递：<prev_scenes> 将 S1 场景表内存字符串注入 S2 上下文；若终品 sequences/<ID>.md
-   * 已存在则同时向 S1/S2 都附加 <current_target>=旧版作 baseline 微修参照。
-   *
-   * v6.2 结构化 validator 挂载：runPipeline 在此为每 step 动态绑定 structuralCheck 钩子
-   * （scene_designer→checkSceneTable、beat_writer→checkBeatTable(scenesMd)），
-   * 因为 checkBeatTable 需跨步依赖 scenesMd 集合，故无法在 skillLoader 静态注册。
+   * 结构红线（B-ID/内嵌 SC-ID）已由 checkBeatBlocks 阻塞校验兜底；字段齐全/词库/相邻规则
+   * 交 SKILL body 引导（v6.8 放宽，不再机械校验）；此处仅校验"量级"
+   * 是否贴合 <product_profile> 声明（如小说每章 2-6 场景、短剧每序列 8-15 集）。
+   * v6.7：场景数仍数表格行；节拍数改块计数（节拍已从整表改为逐场景字段块）。
    */
-  private async runPipeline(
+  private runPipelineSoftValidation(scenesMd: string, beatBySc: Map<string, string>): string[] {
+    const warnings: string[] = []
+    const profile = this.profileLock
+    if (!profile) return warnings
+
+    const sceneRows = countTableDataRows(scenesMd)
+    const [sMin, sMax] = profile.scene.countRange
+    if (sceneRows > 0 && (sceneRows < sMin || sceneRows > sMax)) {
+      warnings.push(
+        `场景数 ${sceneRows} 越出 <product_profile> 区间 [${sMin}, ${sMax}]（${profile.scene.semantic}）`,
+      )
+    }
+
+    // 节拍已改逐场景字段块，改块计数：校验"平均每场景节拍数"是否贴合 beat.countRange
+    const beatCount = [...beatBySc.values()].reduce((n, md) => n + countBeatBlocks(md), 0)
+    const avgBeats = sceneRows > 0 ? Math.round(beatCount / sceneRows) : 0
+    const [bMin, bMax] = profile.beat.countRange
+    if (avgBeats > 0 && (avgBeats < bMin || avgBeats > bMax)) {
+      warnings.push(
+        `平均每场景节拍数 ${avgBeats} 越出档案区间 [${bMin}, ${bMax}]（总 ${beatCount} 拍 / ${sceneRows} 场景）`,
+      )
+    }
+
+    return warnings
+  }
+
+  /**
+   * v6.7 单步 LLM 执行（供 runSequencePipeline 段②③复用，抽自原 runPipeline 重试块）。
+   *
+   * 读 skill.reads → assembleContext → appendExtraLabels(opts.extras) → sendMessage ×≤MAX_RETRIES
+   * → validateOutput（挂 opts.structuralCheck，INV-1 validator 主体不改）。
+   * 成功返回 extracted[skill.writes[0]]；连续失败返回 null（调用方决定 abort 或降级占位）。
+   */
+  private async runSingleStep(
+    subagent: SubagentSpec,
+    skill: SkillSpec,
+    seqId: string,
+    instruction: string,
+    history: ConversationTurn[] | undefined,
+    opts: { structuralCheck: SkillSpec['structuralCheck']; extras: ExtraLabelEntry[] },
+  ): Promise<string | null> {
+    // ① 读 static reads
+    const files: Record<string, string> = {}
+    for (const p of skill.reads) {
+      files[p] = await safeRead(this.fileManager, p)
+    }
+
+    // ② 拼 static ctx + append extras（prev_scenes/target_scene/current_target/product_profile 等）
+    const ctxFull = appendExtraLabels(assembleContext(skill.reads, files), opts.extras)
+
+    // ③ sysPrompt = 角色前缀 + Skill 正文；specView 承载临时 structuralCheck
+    const systemPrompt = skill.preamble ? `${skill.preamble}\n\n${skill.body}` : skill.body
+    const specView: SkillSpec = { ...skill, structuralCheck: opts.structuralCheck }
+
+    let userContent = buildAgentPrompt(ctxFull, instruction, history)
+
+    // ④ sendMessage ×≤MAX_RETRIES + validateOutput(specView)
+    let ok = false
+    let stepContent = ''
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const out = await this.sendWithRateLimit(
+          { toolId: subagent.id, toolName: subagent.name, skillId: skill.skillId, skillName: skill.name },
+          systemPrompt, userContent,
+        )
+        const vr = validateOutput(out, specView)
+        if (vr.valid) {
+          stepContent = vr.extracted[skill.writes[0]] ?? ''
+          ok = true
+          break
+        }
+        if (attempt < MAX_RETRIES - 1) {
+          this.emit('tool_retry', {
+            toolId: subagent.id,
+            toolName: subagent.name,
+            skillId: skill.skillId,
+            skillName: skill.name,
+            attempt: attempt + 1,
+            maxAttempts: MAX_RETRIES,
+            message: `${subagent.name}[${seqId}/${skill.skillId}] 格式错误重试 ${attempt + 1}/${MAX_RETRIES}`,
+          })
+          const feedback = vr.structuralError
+            ? `⚠️ 结构错误：${vr.structuralError}`
+            : `⚠️ 格式错误：输出须包含 ${specView.outputTags[0]} 与 ${specView.outputTags[1]} 包裹，请严格遵循模板再次生成。`
+          userContent = `${userContent}\n\n---\n${feedback}`
+        }
+      } catch {
+        if (attempt === MAX_RETRIES - 1) break
+      }
+    }
+
+    return ok ? stepContent : null
+  }
+
+  /**
+   * v6.7 统一附加标签：<current_target>(priorDraft baseline) + <product_profile>。
+   * 供段②场景表与段③逐场景节拍复用，两段的 REFINE 判定据 <current_target> 一致命中。
+   */
+  private designExtras(priorDraft: string): ExtraLabelEntry[] {
+    const extras: ExtraLabelEntry[] = []
+    if (priorDraft.length > 0) {
+      extras.push({ label: 'current_target', content: priorDraft })
+    }
+    if (this.profileLock) {
+      extras.push({ label: 'product_profile', content: renderProductProfileXml(this.profileLock) })
+    }
+    return extras
+  }
+
+  /**
+   * v6.7 单序列三段式流水线（精修入口 / 批量循环体）。
+   *
+   * ① 建档（0 LLM）：先落骨架占位，UI 立即出现卡片；
+   * ② 场景表（1 LLM，checkSceneTable）：沿用 7 列表格，失败即 abort；
+   * ③ 逐场景节拍（每场景 1 LLM，checkBeatBlocks）：引擎按场景 ID 遍历，单场景失败降级占位不阻断。
+   * 收口 assembleSequenceDoc 覆写落盘 + 数量软校验。
+   */
+  private async runSequencePipeline(
     subagent: SubagentSpec,
     pipe: PipeRegistryValue,
-    target: string,
+    seqId: string,
     instruction: string,
     history?: ConversationTurn[],
   ): Promise<ToolResult> {
     const subSkills = getSkills(subagent.id)
-    const finalResolvedPath = `sequences/${target}.md`
-    const priorFinalDraft = await safeRead(this.fileManager, finalResolvedPath)
-
-    // 步间内存字符串传递：key=step.label（如 'prev_scenes'），value=上一步 extracted 内容
-    const stepOutputs = new Map<string, string>()
-
-    for (let i = 0; i < pipe.steps.length; i++) {
-      const step = pipe.steps[i]
-      const stepSkill = subSkills.find((s) => s.skillId === step.skillId)
-      if (!stepSkill) {
-        return {
-          success: false,
-          error: `[${subagent.id}] 流水线配置异常：未找到已注册的第 ${i + 1} 步 skill "${step.skillId}"`,
-          skillName: subagent.name,
-        }
+    const sceneSkill = subSkills.find((s) => s.skillId === pipe.sceneStep.skillId)
+    const beatSkill = subSkills.find((s) => s.skillId === pipe.beatStep.skillId)
+    if (!sceneSkill || !beatSkill) {
+      return {
+        success: false,
+        error: `[${subagent.id}] 流水线配置异常：未找到 scene/beat skill`,
+        skillName: subagent.name,
       }
+    }
+    const finalPath = `sequences/${seqId}.md`
+    const priorDraft = await safeRead(this.fileManager, finalPath) // REFINE baseline
 
-      // ① 结构化 validator 钩子按 skillId 动态挂载（v6.2）
-      const structuralCheck = buildStructuralCheckForStep(
-        step.skillId,
-        stepOutputs.get('prev_scenes'),
-      )
-      // specView 承载临时 structuralCheck；writes[0] 沿用 placeholder 供 validator 记账,
-      // 实际不会 writeFile（中间产物纯内存传递）
-      const specView: SkillSpec = { ...stepSkill, structuralCheck }
+    // ① 建档：先落骨架占位，让 UI 立刻出现卡片
+    await this.fileManager.writeFile(finalPath, this.buildSequenceSkeleton(seqId))
 
-      // ② 读 static reads
-      const files: Record<string, string> = {}
-      for (const p of stepSkill.reads) {
-        files[p] = await safeRead(this.fileManager, p)
-      }
+    // ② 场景表（1 次 LLM，checkSceneTable）
+    const scenesMd = await this.runSingleStep(subagent, sceneSkill, seqId, instruction, history, {
+      structuralCheck: (x) => checkSceneTable(x),
+      extras: this.designExtras(priorDraft),
+    })
+    if (scenesMd == null) return this.pipelineFail(subagent, seqId, '场景表', finalPath)
 
-      // ③ 拼 static ctx 再 append 前续步骤产出的 prev_<X> 标签与 current_target baseline
-      let ctxFull = assembleContext(stepSkill.reads, files)
-      const extras: ExtraLabelEntry[] = []
-      for (const [label, content] of stepOutputs) {
-        extras.push({ label, content })
-      }
-      if (priorFinalDraft.length > 0) {
-        // v6.2 REFINE 信号：终品已存在时向每一步都附加 <current_target>=旧版，
-        // 让 scene_designer 与 beat_writer 各自 SKILL body 的双模判定能一致命中 REFINE。
-        extras.push({ label: 'current_target', content: priorFinalDraft })
-      }
-      ctxFull = appendExtraLabels(ctxFull, extras)
-
-      // ④ sysPrompt=preamble+body
-      const systemPrompt = stepSkill.preamble
-        ? `${stepSkill.preamble}\n\n${stepSkill.body}`
-        : stepSkill.body
-
-      // ⑤ derivedInstruction：首步沿用 Orc 原 instruction；后续步骤注入固定推进语引导模型据上文继续
-      const refsHint = Array.from(stepOutputs.keys()).map((k) => `<${k}>`).join('、')
-      const derivedInstruction =
-        i === 0
-          ? instruction
-          : `承接前一阶段产物(${refsHint}均已注入上下文)，按本技能规范完成「${stepSkill.name}」职责范围的输出。\n原始指令参考：${instruction}`
-
-      let userContent = buildAgentPrompt(ctxFull, derivedInstruction, history)
-
-      // ⑥ sendMessage ×≤MAX_RETRIES + validateOutput(specView)
-      let lastErr = ''
-      let stepContent = ''
-      let ok = false
-      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        try {
-          const out = await this.llm.sendMessage(systemPrompt, userContent)
-          const vr = validateOutput(out, specView)
-          if (vr.valid) {
-            stepContent = vr.extracted[stepSkill.writes[0]] ?? ''
-            ok = true
-            break
-          }
-          if (attempt < MAX_RETRIES - 1) {
-            this.emit('tool_retry', {
-              toolId: subagent.id,
-              toolName: subagent.name,
-              skillId: stepSkill.skillId,
-              skillName: stepSkill.name,
-              attempt: attempt + 1,
-              maxAttempts: MAX_RETRIES,
-              message: `${subagent.name}[S${i + 1}/${stepSkill.skillId}] 格式错误重试 ${attempt + 1}/${MAX_RETRIES}`,
-            })
-            const feedback = vr.structuralError
-              ? `⚠️ 结构错误：${vr.structuralError}`
-              : `⚠️ 格式错误：输出须包含 ${specView.outputTags[0]} 与 ${specView.outputTags[1]} 包裹，请严格遵循模板再次生成。`
-            userContent = `${userContent}\n\n---\n${feedback}`
-          }
-        } catch (e) {
-          lastErr = (e as Error).message
-          if (attempt === MAX_RETRIES - 1) break
-        }
-      }
-
-      if (!ok) {
-        this.emit('tool_error', {
-          toolId: subagent.id,
-          toolName: subagent.name,
-          skillId: stepSkill.skillId,
-          skillName: stepSkill.name,
-          message: `${subagent.name}[S${i + 1}/${stepSkill.skillId}] 连续 ${MAX_RETRIES} 次未合规，流水线中止`,
-        })
-        return {
-          success: false,
-          error: `序列切片流水线在第 ${i + 1} 步 (${stepSkill.skillId}) 中止：${
-            lastErr || 'validateOutput 反复失败'
-          }`,
-          skillName: subagent.name,
-        }
-      }
-
-      // ⑦ 中间产物存内存供下一步注入（不 writeFile）
-      stepOutputs.set(step.label, stepContent)
+    // ③ 逐场景节拍（每场景 1 次 LLM，checkBeatBlocks）
+    const sceneIds = [...extractSceneIds(scenesMd)]
+    const beatBySc = new Map<string, string>()
+    for (const sc of sceneIds) {
+      const blockMd = await this.runSingleStep(subagent, beatSkill, seqId, instruction, history, {
+        structuralCheck: (x) => checkBeatBlocks(x, sc),
+        extras: [
+          { label: 'prev_scenes', content: scenesMd },
+          { label: 'target_scene', content: this.sliceSceneRow(scenesMd, sc) },
+          ...this.designExtras(priorDraft),
+        ],
+      })
+      beatBySc.set(sc, blockMd ?? `<!-- 待补节拍 ${sc}（生成失败） -->`) // 降级不阻断
     }
 
-    // ⑧ S3 引擎代码收口：拼装两表 + 结构复核 → 落盘 sequences/<ID>.md
-    const scenesMd = stepOutputs.get('prev_scenes') ?? ''
-    const beatsMd = stepOutputs.get('prev_beats') ?? ''
-    const finalMd = assembleSequenceOutline(target, scenesMd, beatsMd)
-    await this.fileManager.writeFile(finalResolvedPath, finalMd)
+    // 收口：拼装覆写落盘
+    const finalMd = assembleSequenceDoc(seqId, scenesMd, sceneIds, beatBySc)
+    await this.fileManager.writeFile(finalPath, finalMd)
 
-    // 归属最后一步 LLM 的 skillId 供事件流展示（S3 是引擎代码不占 skill 身份）
-    const lastLlmStep = pipe.steps[pipe.steps.length - 1]
-    const lastStepSkill = subSkills.find((s) => s.skillId === lastLlmStep.skillId)!
+    const softWarnings = this.runPipelineSoftValidation(scenesMd, beatBySc)
     return {
       success: true,
-      writes: [finalResolvedPath],
+      writes: [finalPath],
       output: '',
-      skillId: lastStepSkill.skillId,
-      skillName: lastStepSkill.name,
+      skillId: beatSkill.skillId,
+      skillName: beatSkill.name,
+      warnings: softWarnings.length > 0 ? softWarnings : undefined,
     }
+  }
+
+  /**
+   * v6.7 全序列串行批量：读 sequence_list.md 解析全部序列 ID，for...await 串行跑
+   * runSequencePipeline（偏差③并行本次不做），汇总为单 ToolResult 对 Orche 原子化。
+   */
+  private async runBatchPipeline(
+    subagent: SubagentSpec,
+    pipe: PipeRegistryValue,
+    instruction: string,
+    history?: ConversationTurn[],
+  ): Promise<ToolResult> {
+    const seqListMd = await safeRead(this.fileManager, 'sequence_list.md')
+    const seqIds = this.parseSequenceIds(seqListMd)
+    if (seqIds.length === 0) {
+      return {
+        success: false,
+        error: '未能从 sequence_list.md 解析出任何序列 ID，请先生成序列清单',
+        skillName: subagent.name,
+      }
+    }
+
+    this.emit('tool_start', {
+      toolId: subagent.id,
+      toolName: subagent.name,
+      message: `串行批量铺设 ${seqIds.length} 个序列`,
+    })
+
+    // v6.8 并发池（偏差③闭合：串行 for → runWithConcurrency），汇总逻辑按下标对齐不变
+    const results = await this.runWithConcurrency(seqIds, PIPELINE_CONCURRENCY,
+      (seqId) => this.runSequencePipeline(subagent, pipe, seqId, instruction, history))
+
+    // 汇总
+    const writes: string[] = []
+    const warnings: string[] = []
+    let okCount = 0
+    results.forEach((r, i) => {
+      if (r.success) {
+        okCount++
+        if (r.writes) writes.push(...r.writes)
+        if (r.warnings) warnings.push(...r.warnings)
+      } else {
+        warnings.push(`序列 ${seqIds[i]} 失败：${r.error}`)
+      }
+    })
+
+    return {
+      success: okCount > 0,
+      writes,
+      output: '',
+      skillId: pipe.beatStep.skillId,
+      skillName: subagent.name,
+      error: okCount === 0 ? '全部序列生成失败' : undefined,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    }
+  }
+
+  /**
+   * v6.8 有界并发池：最多 limit 个 worker 同时跑，超出排队。
+   * out[i] 与 items[i] 下标对齐（无论完成顺序），保证 runBatchPipeline 汇总 seqIds[i] 正确。
+   */
+  private async runWithConcurrency<T, R>(
+    items: T[], limit: number, worker: (item: T) => Promise<R>,
+  ): Promise<R[]> {
+    const out: R[] = new Array(items.length)
+    let next = 0
+    const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++
+        out[i] = await worker(items[i])
+      }
+    })
+    await Promise.all(runners)
+    return out
+  }
+
+  /**
+   * v6.8 429 指数退避重试（复用 classifyLLMError 识别 rate_limit）。
+   * 非 429 直接抛交原流程；429 退避重试不消耗 MAX_RETRIES 格式重试预算。
+   */
+  private async sendWithRateLimit(
+    ctx: { toolId: string; toolName: string; skillId: string; skillName: string },
+    systemPrompt: string, userContent: string,
+  ): Promise<string> {
+    const MAX_429_RETRIES = 3
+    for (let i = 0; i < MAX_429_RETRIES; i++) {
+      try {
+        return await this.llm.sendMessage(systemPrompt, userContent)
+      } catch (e) {
+        if (classifyLLMError(e).type !== 'rate_limit' || i === MAX_429_RETRIES - 1) throw e
+        const backoff = 1000 * Math.pow(2, i) // 1s → 2s → 4s
+        this.emit('tool_retry', {
+          toolId: ctx.toolId, toolName: ctx.toolName, skillId: ctx.skillId, skillName: ctx.skillName,
+          attempt: i + 1, maxAttempts: MAX_429_RETRIES,
+          message: `429 限流，${backoff}ms 后重试 (${i + 1}/${MAX_429_RETRIES})`,
+        })
+        await new Promise((r) => setTimeout(r, backoff))
+      }
+    }
+    throw new Error('unreachable')
+  }
+
+  /** v6.7 段②/③失败收口：返回中断位点指示的失败 ToolResult（骨架已落盘，UI 卡片保留） */
+  private pipelineFail(
+    subagent: SubagentSpec,
+    seqId: string,
+    stage: string,
+    finalPath: string,
+  ): ToolResult {
+    this.emit('tool_error', {
+      toolId: subagent.id,
+      toolName: subagent.name,
+      message: `${subagent.name}[${seqId}] 在「${stage}」阶段连续失败，流水线中止`,
+    })
+    return {
+      success: false,
+      error: `序列 ${seqId} 在「${stage}」阶段生成失败`,
+      writes: [finalPath],
+      skillName: subagent.name,
+    }
+  }
+
+  /** v6.7 从 sequence_list.md 扫全部序列 ID（S{幕}-{序}），去重排序 */
+  private parseSequenceIds(seqListMd: string): string[] {
+    const set = new Set<string>()
+    const re = /\bS\d+-\d+\b/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(seqListMd)) !== null) set.add(m[0])
+    return [...set].sort()
+  }
+
+  /** v6.7 建档骨架：带标题占位，让 UI 立即出现卡片 */
+  private buildSequenceSkeleton(seqId: string): string {
+    return `<<<SCENE_BEAT_OUTLINE_START>>>\n# ${seqId}\n\n### 场景表\n\n*（生成中…）*\n\n### 节拍\n\n*（生成中…）*\n<<<SCENE_BEAT_OUTLINE_END>>>`
+  }
+
+  /** v6.7 从场景表抽 sc 那一行原样（供 <target_scene> 精准注入，模型只看这一个场景） */
+  private sliceSceneRow(scenesMd: string, sc: string): string {
+    const line = scenesMd.split(/\r?\n/).find((l) => l.includes(sc))
+    return line ? line.trim() : sc
   }
 
   /**
@@ -829,22 +1289,76 @@ export class OrchestratorEngine {
   ): Promise<DispatchResult> {
     // ① 计算可用 Subagent（v5：全部始终可见）
     this.onEvent = onEvent
+    // v6.8 审计修复状态每轮用户输入重置（不跨用户输入残留，避免"检查后用户改做别的"误拦上游）
+    this.auditFixMode = false
+    this.auditScope = null
     const availableSubagents = getAvailableSubagents()
 
-    // ===== v6.1 Guard-1: Phase Gate 可见性过滤（FC 面）=====
-    // 设计期剔除 script_writer 让其不可达避免未成熟即开写；写作期剔除全部 CREATIVE_TOOL_IDS
-    // 及 story_checker 彻底断绝上游回流污染与质检回路消耗，保住 requirements_analyzer 自动化链路畅通。
+    // ===== v6.6 Guard-0/1：产品锁 + Phase Gate 双重可见性过滤（FC 面）=====
+    //  - profileLock=null：未选产品 → 仅 reset_all 可见（设计区+成文区全隐藏）
+    //  - 设计期：剔除全部四 writer（须先🔒锁定大纲进写作期才可写正文）
+    //  - 写作期：剔除设计区 + story_checker + 非本产品 writer（仅留 profileLock.writerSubagentId）
     const phaseState0 = usePhaseStore.getState()
-    const visibleSubagents =
-      phaseState0.isWriting()
-        ? availableSubagents.filter(
-            (sa) => !CREATIVE_TOOL_IDS.includes(sa.id) && sa.id !== 'story_checker',
-          )
-        : availableSubagents.filter((sa) => sa.id !== 'script_writer')
+    // v6.6：input_normalizer 仅在"无设计资产"时进 FC 面（早期可用），有资产后隐藏
+    const allAssetFiles0 = await this.fileManager.listAssetFiles()
+    const hasDesignAssets = allAssetFiles0.some(
+      (a) =>
+        a.exists &&
+        ['worldbuilding.md', 'characters.md', 'act_map.md', 'sequence_list.md'].includes(a.path),
+    )
+    let visibleSubagents: SubagentSpec[]
+    if (this.profileLock === null) {
+      visibleSubagents = availableSubagents.filter((sa) => sa.id === 'reset_all')
+    } else if (phaseState0.isWriting()) {
+      const activeWriter = this.profileLock.writerSubagentId
+      visibleSubagents = availableSubagents.filter(
+        (sa) =>
+          !CREATIVE_TOOL_IDS.includes(sa.id) &&
+          sa.id !== 'story_checker' &&
+          sa.id !== 'input_normalizer' &&
+          !(WRITER_IDS.includes(sa.id) && sa.id !== activeWriter),
+      )
+    } else {
+      visibleSubagents = availableSubagents.filter(
+        (sa) => !WRITER_IDS.includes(sa.id) && (sa.id !== 'input_normalizer' || !hasDesignAssets),
+      )
+    }
     const toolSpecs = visibleSubagents.map(buildFunctionSpec)
 
     // ② 加载 System Prompt（注入工具列表）
     let systemPrompt = loadOrchestratorPrompt(toolSpecs)
+
+    // ②.4 v6.6 前置归一化：检测到未归一化的 _input_raw.md 时，强制先跑 input_normalizer，
+    //      再允许需求合并——否则整篇原文会被 user_requirements_analyzer 当"需求"吞掉。
+    //      （补 checker 第 7 条；归一化成功后 executeTool 内部已 clearInputRaw 标记已消费）
+    const rawInput = await safeRead(this.fileManager, '_input_raw.md')
+    if (rawInput.length > 0) {
+      const normalizer = getSubagent('input_normalizer')
+      if (normalizer) {
+        this.emit('tool_start', {
+          toolId: normalizer.id,
+          toolName: normalizer.name,
+          message: `归一化投喂：${normalizer.name}`,
+        })
+        const normResult = await this.executeTool(normalizer, NORMALIZE_INSTRUCTION, history)
+        if (normResult.success) {
+          this.emit('tool_complete', {
+            toolId: normalizer.id,
+            toolName: normalizer.name,
+            skillId: normResult.skillId,
+            skillName: normResult.skillName,
+            writes: normResult.writes,
+            message: `${normalizer.name} 完成（产出 ${normResult.writes?.length ?? 0} 个种子资产）`,
+          })
+        } else {
+          this.emit('tool_error', {
+            toolId: normalizer.id,
+            toolName: normalizer.name,
+            message: `${normalizer.name} 失败：${normResult.error ?? '未知错误'}`,
+          })
+        }
+      }
+    }
 
     // ②.5 前置需求合并（v5.5 机制 A）：每轮确定性地把新需求结合对话上下文
     //      合并进 user_requirements.md，不依赖 Orchestrator 是否主动选择需求整理者。
@@ -1003,7 +1517,7 @@ export class OrchestratorEngine {
             }
 
             // 执行 Subagent（history 仅 analyzer 前置预跑需要；第 4 可选项承载动态靶供
-            // executeTool 内 resolveWriteTarget / runPipeline 消费）
+            // executeTool 内 resolveWriteTarget / runSequencePipeline 消费）
             this.emit('tool_start', {
               toolId: subagentSpec.id,
               toolName: subagentSpec.name,
@@ -1019,13 +1533,18 @@ export class OrchestratorEngine {
             state.toolsCalled.push(subagentSpec.id)
 
             if (result.success) {
+              const warnCount = result.warnings?.length ?? 0
               this.emit('tool_complete', {
                 toolId: subagentSpec.id,
                 toolName: subagentSpec.name,
                 skillId: result.skillId,
                 skillName: result.skillName,
                 writes: result.writes,
-                message: `${subagentSpec.name} 完成`,
+                message:
+                  warnCount > 0
+                    ? `${subagentSpec.name} 完成（含 ${warnCount} 条提示）`
+                    : `${subagentSpec.name} 完成`,
+                warnings: result.warnings,
               })
             } else {
               this.emit('tool_error', {
@@ -1041,6 +1560,11 @@ export class OrchestratorEngine {
             // story_checker 注入完整报告，其余 Subagent 返回简短消息
             if (subagentSpec.id === 'story_checker' && result.success) {
               const report = await this.fileManager.readFile('_check_report.md')
+              // v6.8 Guard-3 状态：由 AUDIT_SCOPE 标记判定（避免总体结论正则跨段误匹配）
+              const scopeMatch = report.match(/<!-- AUDIT_SCOPE: (\w+) -->/)
+              const scope = scopeMatch?.[1] ?? null
+              this.auditFixMode = scope === 'sequence_only' || scope === 'has_upstream'
+              this.auditScope = scope === 'sequence_only' ? 'sequence_only' : null
               messages.push({
                 role: 'tool',
                 tool_call_id: toolCall.id,

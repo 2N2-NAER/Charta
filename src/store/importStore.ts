@@ -41,14 +41,22 @@ export const useImportStore = create<ImportStore>((set, get) => ({
   },
 
   confirmImportToAsset: async (targetPath: string) => {
-    // v4 MVP 暂不实现覆盖资产导入，留作扩展
+    // v6.6：投喂文件落 _input_raw.md（input_normalizer 生产端），不再"待实现"。
+    // 单文件直写、多文件追加合并（带 <<< 来源:文件名 >>> 分隔）。
     set({ isImporting: true })
     try {
-      const { previewFilename } = get()
+      const { previewContent, previewFilename } = get()
+      if (previewContent) {
+        // 无论 targetPath 传何值，统一落 _input_raw.md 交由 input_normalizer 归一化
+        await useChatStore.getState().appendInputRaw(
+          previewFilename ?? targetPath,
+          previewContent,
+        )
+      }
       const msg: import('../types').ChatMessage = {
         id: `import_${Date.now()}`,
         role: 'system',
-        content: `已将 [${previewFilename}] 导入到 ${targetPath}（覆盖资产卡片功能待实现）`,
+        content: `已将 [${previewFilename}] 落入 _input_raw.md，将在下一轮对话前由「输入归一化」自动分类为种子资产`,
         timestamp: Date.now(),
       }
       useChatStore.getState().addMessage(msg)

@@ -1,4 +1,5 @@
 import type { SubagentSpec, SkillSpec } from '../types'
+import { WRITER_IDS } from '../types/product'
 import type OpenAI from 'openai'
 
 type ChatCompletionTool = OpenAI.Chat.Completions.ChatCompletionTool
@@ -243,20 +244,21 @@ export function getSkills(subagentId: string): SkillSpec[] {
   return SKILLS_BY_SUBAGENT.get(subagentId) ?? []
 }
 
-const NEEDS_TARGET_PARAM = new Set<string>(['scene_beats', 'script_writer'])
+// v6.6：scene_beats 用 target_sequence；四个产品 writer 用 target_chapter（白名单由 WRITER_IDS 派生）
+const NEEDS_TARGET_PARAM = new Set<string>(['scene_beats', ...WRITER_IDS])
 
 function resolveTargetParamName(
   subagentId: string,
 ): 'target_sequence' | 'target_chapter' | null {
   if (!NEEDS_TARGET_PARAM.has(subagentId)) return null
-  return subagentId === 'script_writer' ? 'target_chapter' : 'target_sequence'
+  return WRITER_IDS.includes(subagentId) ? 'target_chapter' : 'target_sequence'
 }
 
 /**
  * 从 SubagentSpec 构建 OpenAI 兼容的 Function Calling 参数
  * 仅暴露 id + description，与 v5 行为一致保证 FC 面 stable。
  *
- * scene_beats / script_writer 额外附非必填 target_sequence / target_chapter 参数，
+ * scene_beats / 四个产品 writer 额外附非必填 target_sequence / target_chapter 参数，
  * 引擎 executeTool.resolveWriteTarget 据此构造 effectiveWrites 替换 frontmatter writes placeholder。
  * 格式合法性由 engine dispatch 时硬校验早退拒绝；此处仅在 description 给示例提示引导模型填合规值。
  */
@@ -271,16 +273,24 @@ export function buildFunctionSpec(subagent: SubagentSpec): ChatCompletionTool {
 
   if (paramName !== null) {
     const isChapter = paramName === 'target_chapter'
-    const kindLabel = isChapter ? '目标章节' : '目标序列'
-    const sinkHint = isChapter
-      ? 'chapters/<target>.md 正文成品'
-      : '两步 LLM(scene_designer → beat_writer)后由引擎代码拼装至 sequences/<target>.md 场记切片'
-    properties[paramName] = {
-      type: 'string',
-      description:
-        `${kindLabel}标识符，形如 \`S1-1\`(主层级)或 \`SC-S1-1-01\`(细粒度子级)；` +
-        `引擎据其拼装写入路径：${sinkHint}；` +
-        `缺值或格式非法将由 Guard 早退拒绝、不下沉给模型重试以免白白消耗 retry 配额。`,
+    if (isChapter) {
+      properties[paramName] = {
+        type: 'string',
+        description:
+          '目标章节标识符，形如 `S1-1`(主层级)或 `SC-S1-1-01`(细粒度子级)；' +
+          '引擎据其拼装写入路径：chapters/<target>.md 正文成品；' +
+          '缺值或格式非法将由 Guard 早退拒绝、不下沉给模型重试以免白白消耗 retry 配额。',
+      }
+    } else {
+      // v6.7 scene_beats：target_sequence 可选——留空=全量串行批量，填=精修单序列
+      properties[paramName] = {
+        type: 'string',
+        description:
+          '**可选**。留空=引擎读序列清单串行批量铺设**全部序列**(一次 tool_call 内 for 循环)；' +
+          '填写合法序列号(如 `S1-1`)=只**精修该单序列**、覆写 sequences/<target>.md、其余不动；' +
+          '每序列内部经三段式(建档 → scene_designer 写场景表 → beat_writer 逐场景写节拍块)后由引擎拼装落盘。' +
+          '有值但格式非法会被 Guard 早退拒绝，故要么留空、要么填合规序列号。',
+      }
     }
   }
 

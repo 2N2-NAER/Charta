@@ -26,6 +26,7 @@ outputTags: ['<<<SEQUENCE_LIST_START>>>', '<<<SEQUENCE_LIST_END>>>']
 - `<act_map>`：幕结构
 - `<user_requirements>`：用户需求文档
 - `<sequence_list>`：已有序列清单（如有）
+- `<product_profile>`：v6.6 产品档案，**每幕序列数取其中 `<layer name="序列" count="X-Y"/>` 区间**（小说每卷 3-12 章、剧本每幕 2-6 序列、长剧每阶段 2-8 集、短剧每幕恰 1 序列）；`sequence_to_episode` 标注序列↔集映射（长剧 one_to_one、短剧 one_to_many）
 
 ### 模式判断
 
@@ -45,7 +46,7 @@ outputTags: ['<<<SEQUENCE_LIST_START>>>', '<<<SEQUENCE_LIST_END>>>']
 ## 输出结构
 
 ### 序列数量
-- 每幕 2-N 个序列，按故事复杂度决定
+- **每幕序列数取 `<product_profile>` 序列层 count 区间**（短剧为硬约束 [1,1]：每幕恰 1 序列）；区间内按故事复杂度决定
 - 序列ID 格式：`S{幕号}-{序号}`（如 S1-1、S1-2、S2-1）
 
 ### 序列结构表（11 列）

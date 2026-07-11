@@ -77,7 +77,7 @@ export interface SkillSpec {
    * 则视作结构错误、消息将作为 retry 反馈追加到 userContent 尾部。
    *
    * 该钩子无法通过 SKILL.md frontmatter 声明（自研解析器只吃扁平标量+内联数组）。
-   * 由 orchestratorEngine 在 runPipeline / executeTool 内按 subagentId/skillId 动态挂载。
+   * 由 orchestratorEngine 在 runSingleStep / executeTool 内按 subagentId/skillId 动态挂载。
    *
    * 未定义 = 保持既有行为（仅 tag 存在性校验）。
    */

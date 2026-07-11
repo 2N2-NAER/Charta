@@ -156,3 +156,47 @@
   padding: 4px 0;
   text-align: center;
 }
+
+/* v6.6：产品方向选择器 */
+.productSelector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+
+.productBtn {
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  border-radius: calc(var(--radius-control) - 2px);
+  cursor: pointer;
+  transition:
+    background-color 160ms ease-out,
+    color 160ms ease-out;
+}
+
+.productBtn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.productBadge {
+  padding: 4px 12px;
+  background: rgba(74, 90, 168, 0.12);
+  border: 1px solid rgba(74, 90, 168, 0.3);
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-control);
+}
+
+.productHint {
+  font-size: 12px;
+  color: var(--color-warning);
+}

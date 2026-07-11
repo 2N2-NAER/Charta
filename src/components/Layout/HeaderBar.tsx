@@ -1,6 +1,8 @@
 import { useState, useCallback } from 'react'
 import { usePhaseStore } from '../../store/phaseStore'
 import { useAssetStore } from '../../store/assetStore'
+import { useChatStore } from '../../store/chatStore'
+import { PRODUCT_PROFILES } from '../../types/product'
 import styles from './HeaderBar.module.css'
 
 interface HeaderBarProps {
@@ -10,6 +12,8 @@ interface HeaderBarProps {
 export function HeaderBar({ title = 'StoryCrafter' }: HeaderBarProps) {
   const phase = usePhaseStore((s) => s.phase)
   const lock = usePhaseStore((s) => s.lock)
+  const product = useChatStore((s) => s.product)
+  const setProduct = useChatStore((s) => s.setProduct)
   const phaseLock = useCallback(
     () => {
       const fm = useAssetStore.getState().fileManager
@@ -46,12 +50,34 @@ export function HeaderBar({ title = 'StoryCrafter' }: HeaderBarProps) {
         </span>
         <span className={styles.logo}>
           {title}
-          <span className={styles.version}>v6.4</span>
+          <span className={styles.version}>v6.6</span>
         </span>
       </div>
 
-      {/* v6.4：Phase Gate 锁/解锁 CTA + 进度概览 */}
       <div className={styles.actions}>
+        {/* v6.6：产品方向选择器（设计期+未选产品时可选；选定后显示徽标，切换须 reset_all）*/}
+        {product !== null ? (
+          <span className={styles.productBadge} title="产品方向已锁定，切换需重置">
+            {PRODUCT_PROFILES[product].displayName}
+          </span>
+        ) : phase === 'designing' ? (
+          <div className={styles.productSelector}>
+            {Object.values(PRODUCT_PROFILES).map((p) => (
+              <button
+                key={p.kind}
+                className={styles.productBtn}
+                onClick={() => setProduct(p.kind)}
+                title={`选择 ${p.displayName} 方向`}
+              >
+                {p.displayName}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span className={styles.productHint}>未选产品</span>
+        )}
+
+        {/* v6.4：Phase Gate 锁/解锁 CTA + 进度概览 */}
         {/* 进度概览 */}
         {phase === 'writing' && (
           <div
