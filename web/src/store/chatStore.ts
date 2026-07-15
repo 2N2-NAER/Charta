@@ -66,6 +66,16 @@ function createSystemMessage(content: string): ChatMessage {
   }
 }
 
+function truncateHistoryContent(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content
+  const marker = '\n\n...[消息过长，已截断中间内容]...\n\n'
+  if (maxChars <= marker.length) return content.slice(-maxChars)
+  const available = maxChars - marker.length
+  const headChars = Math.floor(available / 2)
+  const tailChars = available - headChars
+  return `${content.slice(0, headChars)}${marker}${content.slice(-tailChars)}`
+}
+
 /** v7.1 改动3：生成一张待选的 StageCard 提问消息（对话流内渲染，不持久化——交互 UI 态） */
 function createStageProposalMessage(): ChatMessage {
   return {
@@ -142,14 +152,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const history: ConversationTurn[] = []
     for (let i = recentMessages.length - 1; i >= 0; i--) {
       const m = recentMessages[i]
-      const nextChars = historyChars + m.content.length
-      // 始终保留最近一条；更早的消息按字符预算整条淘汰，避免截断语义。
-      if (history.length > 0 && nextChars > HISTORY_CHAR_BUDGET) break
+      const remainingChars = HISTORY_CHAR_BUDGET - historyChars
+      if (remainingChars <= 0) break
+      // 更早的消息按字符预算整条淘汰，避免截断多条消息的语义。
+      if (history.length > 0 && m.content.length > remainingChars) break
+      const historyContent = truncateHistoryContent(m.content, remainingChars)
       history.unshift({
         role: m.role === 'system' ? 'assistant' : 'user',
-        content: m.content,
+        content: historyContent,
       })
-      historyChars = nextChars
+      historyChars += historyContent.length
     }
 
     // ③ 添加用户消息，重置执行日志
