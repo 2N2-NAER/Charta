@@ -21,15 +21,13 @@ interface ChatStore {
   messages: ChatMessage[]
   isProcessing: boolean
   executionLog: ExecutionEvent[]
+  /** v7.4：当前 executionLog 所属轮次；用于把日志稳定放在该轮结果之前。 */
+  executionTurnId: string | null
   isLogExpanded: boolean
   /** v6.6：当前锁定的产品方向（null=未选产品，UI 须先引导选择）*/
   product: ProductKind | null
 
-  init: (
-    engine: OrchestratorEngine,
-    projectId: string | null,
-    stageProposalPending?: boolean,
-  ) => Promise<void>
+  init: (engine: OrchestratorEngine, projectId: string | null) => Promise<void>
   sendMessage: (content: string) => Promise<void>
   addMessage: (msg: ChatMessage) => void
   clearMessages: () => void
@@ -39,8 +37,6 @@ interface ChatStore {
   setProduct: (kind: ProductKind) => void
   /** v6.6：投喂文件落到 _input_raw.md（input_normalizer 生产端）*/
   appendInputRaw: (filename: string, content: string) => Promise<void>
-  /** v7.1 改动3：StageCard 用户点选阶段——复用 phaseStore.lock/unlock，并把该卡置只读态 */
-  resolveStage: (msgId: string, stage: 'designing' | 'writing') => Promise<void>
 }
 
 // ===== 工具函数 =====
@@ -52,22 +48,32 @@ function nextId(): string {
   return `msg_${Date.now()}_${messageCounter}`
 }
 
-function createUserMessage(content: string): ChatMessage {
+function createUserMessage(content: string, turnId: string): ChatMessage {
   return {
     id: nextId(),
     role: 'user',
     content,
     timestamp: Date.now(),
+    turnId,
   }
 }
 
-function createSystemMessage(content: string): ChatMessage {
+function createSystemMessage(
+  content: string,
+  options?: { turnId?: string; kind?: ChatMessage['kind'] },
+): ChatMessage {
   return {
     id: nextId(),
     role: 'system',
     content,
     timestamp: Date.now(),
+    turnId: options?.turnId,
+    kind: options?.kind,
   }
+}
+
+function nextTurnId(): string {
+  return `turn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 }
 
 function truncateHistoryContent(content: string, maxChars: number): string {
@@ -78,18 +84,6 @@ function truncateHistoryContent(content: string, maxChars: number): string {
   const headChars = Math.floor(available / 2)
   const tailChars = available - headChars
   return `${content.slice(0, headChars)}${marker}${content.slice(-tailChars)}`
-}
-
-/** v7.4：生成项目级待选 StageCard；卡片内容不进聊天记录，pending 状态写项目 metadata。 */
-function createStageProposalMessage(): ChatMessage {
-  return {
-    id: nextId(),
-    role: 'system',
-    content: '请选择创作阶段',
-    timestamp: Date.now(),
-    kind: 'stage_proposal',
-    stageState: 'pending',
-  }
 }
 
 // ===== 模块级变量（不放入 Store 响应式状态） =====
@@ -119,20 +113,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
   isProcessing: false,
   executionLog: [],
+  executionTurnId: null,
   isLogExpanded: false,
   product: null,
 
-  init: async (
-    engine: OrchestratorEngine,
-    projectId: string | null,
-    stageProposalPending = false,
-  ) => {
+  init: async (engine: OrchestratorEngine, projectId: string | null) => {
     _engine = engine
     _projectId = projectId ?? null
     // 重置 state（首次 init / 切项目都走此路径）
     set({
       messages: [],
       executionLog: [],
+      executionTurnId: null,
       isLogExpanded: false,
       isProcessing: false,
       product: engine.getProfile()?.kind ?? null,
@@ -141,14 +133,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (_projectId) {
       try {
         const history = await loadChat(_projectId)
-        const messages = [...history.messages]
-        if (
-          stageProposalPending &&
-          !messages.some((m) => m.kind === 'stage_proposal' && m.stageState === 'pending')
-        ) {
-          messages.push(createStageProposalMessage())
-        }
-        set({ messages })
+        set({ messages: [...history.messages] })
       } catch (e) {
         console.error('[chatStore] 加载对话历史失败', e)
       }
@@ -180,11 +165,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     // ③ 添加用户消息，重置执行日志
-    const userMsg = createUserMessage(content)
+    const turnId = nextTurnId()
+    const userMsg = createUserMessage(content, turnId)
+    let resultDelivered = false
     set((state) => ({
       messages: [...state.messages, userMsg],
       isProcessing: true,
       executionLog: [],
+      executionTurnId: turnId,
       isLogExpanded: true,
     }))
     persistMessage(userMsg)
@@ -206,44 +194,44 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
       })
 
-      // ⑤ 刷新资产文件（兜底全量刷新）
-      await useAssetStore.getState().refreshAllFiles()
-
-      // ⑥ 添加系统回复，折叠日志
-      const sysMsg = createSystemMessage(result.response)
+      // ⑤ 先添加确定性结果并结束处理态；兜底全量刷新不再阻塞用户看到回复。
+      const sysMsg = createSystemMessage(result.response, { turnId, kind: 'turn_result' })
       set((state) => ({
         messages: [...state.messages, sysMsg],
+        isProcessing: false,
         isLogExpanded: false,
       }))
       persistMessage(sysMsg)
+      resultDelivered = true
 
-      // ⑥.5 v7.1 改动3：引擎探测到"全部场记完成且仍处设计期" → 追加一张 StageCard 提问。
-      //      避免重复：对话流中若已存在待选（pending）的 StageCard 则不再追加。
-      if (result.stageProposal) {
-        const hasPendingCard = get().messages.some(
-          (m) => m.kind === 'stage_proposal' && m.stageState === 'pending',
-        )
-        if (!hasPendingCard) {
-          set((state) => ({ messages: [...state.messages, createStageProposalMessage()] }))
-          if (_projectId) {
-            try {
-              await updateProject(_projectId, { stageProposalPending: true })
-            } catch (e) {
-              console.error('[chatStore] 持久化待选阶段卡失败', e)
-            }
-          }
-        }
-      }
+      void useAssetStore.getState().refreshAllFiles().catch((e) =>
+        console.error('[chatStore] 兜底刷新资产失败', e),
+      )
     } catch (error) {
       const classified = classifyLLMError(error)
       const errorMsg = createSystemMessage(
         `⚠️ ${classified.message}\n${classified.detail}`,
+        { turnId, kind: 'turn_result' },
       )
       set((state) => ({
         messages: [...state.messages, errorMsg],
+        isProcessing: false,
+        isLogExpanded: false,
       }))
       persistMessage(errorMsg)
+      resultDelivered = true
     } finally {
+      if (!resultDelivered) {
+        const fallbackMsg = createSystemMessage(
+          '## 本轮已中止\n\n执行意外结束，已完成的资产均已保留，可以重新发送指令继续。',
+          { turnId, kind: 'turn_result' },
+        )
+        set((state) => ({
+          messages: [...state.messages, fallbackMsg],
+          isLogExpanded: false,
+        }))
+        persistMessage(fallbackMsg)
+      }
       const product = _engine?.getProfile()?.kind ?? null
       const phase = usePhaseStore.getState().phase
       set({ isProcessing: false, product })
@@ -298,44 +286,5 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   appendInputRaw: async (filename: string, content: string) => {
     if (!_engine) return
     await _engine.appendInputRaw(filename, content)
-  },
-
-  resolveStage: async (msgId: string, stage: 'designing' | 'writing') => {
-    const phase = usePhaseStore.getState()
-    // 写作阶段 → 复用 phaseStore.lock（拍照 baselines/冻结序列/Guard 生效）；
-    // 设计阶段 → 写作期则 unlock 回退，已在设计期则 NOP。lock 前置校验失败时保留卡片可重试。
-    try {
-      if (stage === 'writing') {
-        const fm = useAssetStore.getState().fileManager
-        if (!fm) return
-        await phase.lock(fm)
-      } else if (phase.isWriting()) {
-        phase.unlock()
-      }
-    } catch (e) {
-      // lock 校验未过（核心设定缺失）→ 提示用户，保留 StageCard 待选态
-      get().addMessage(
-        createSystemMessage(`⚠️ ${e instanceof Error ? e.message : String(e)}`),
-      )
-      return
-    }
-    if (_projectId) {
-      try {
-        await updateProject(_projectId, {
-          phase: usePhaseStore.getState().phase,
-          stageProposalPending: false,
-        })
-      } catch (e) {
-        console.error('[chatStore] 持久化创作阶段失败', e)
-      }
-    }
-    // 该卡片置只读态，记录落定阶段
-    set((state) => ({
-      messages: state.messages.map((m) =>
-        m.id === msgId
-          ? { ...m, stageState: 'resolved' as const, resolvedStage: stage }
-          : m,
-      ),
-    }))
   },
 }))

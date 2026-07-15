@@ -1,5 +1,8 @@
 import { loadConfig, getActiveProfile, type LLMProfile } from './configStore.js'
 
+const UPSTREAM_TIMEOUT_MS = 120_000
+const PROFILE_TEST_TIMEOUT_MS = 20_000
+
 export interface ChatRequestBody {
   messages: unknown[]
   tools?: unknown[]
@@ -72,8 +75,17 @@ export async function proxyChat(body: ChatRequestBody): Promise<unknown> {
       method: 'POST',
       headers,
       body: JSON.stringify(upstreamBody),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     })
   } catch (e) {
+    if (e instanceof Error && (e.name === 'AbortError' || e.name === 'TimeoutError')) {
+      throw new ProxyError(
+        'timeout',
+        'LLM 上游请求超时',
+        504,
+        `单次请求超过 ${UPSTREAM_TIMEOUT_MS / 1000} 秒`,
+      )
+    }
     throw new ProxyError(
       'network',
       '无法连接到 LLM 上游',
@@ -117,6 +129,7 @@ export async function testProfile(
         messages: [{ role: 'user', content: 'ping' }],
         max_tokens: 1,
       }),
+      signal: AbortSignal.timeout(PROFILE_TEST_TIMEOUT_MS),
     })
     const latencyMs = Date.now() - start
     if (!res.ok) {

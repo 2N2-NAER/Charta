@@ -160,18 +160,10 @@ export interface ChatMessage {
   role: 'user' | 'system'
   content: string
   timestamp: number
-  /**
-   * v7.1 改动3：消息类型。缺省（普通文本）；'stage_proposal' 时 ChatHistory 渲染 StageCard。
-   */
-  kind?: 'stage_proposal'
-  /**
-   * v7.1 改动3：StageCard 交互状态。'pending' 可点选；'resolved' 只读展示已选阶段。
-   */
-  stageState?: 'pending' | 'resolved'
-  /**
-   * v7.1 改动3：StageCard 用户点选后的落定阶段（resolved 时有值）。
-   */
-  resolvedStage?: 'designing' | 'writing'
+  /** v7.4：同一轮用户消息、执行日志与结果消息的稳定关联 ID。 */
+  turnId?: string
+  /** v7.4：确定性本轮结果；用于把结果稳定渲染在执行日志之后。 */
+  kind?: 'turn_result'
 }
 
 /**
@@ -226,6 +218,38 @@ export interface SchedulerState {
   toolResults: ToolResult[]
 }
 
+export type TurnStatus = 'completed' | 'partial' | 'failed' | 'interrupted'
+
+export type TurnStopReason =
+  | 'normal'
+  | 'error'
+  | 'length'
+  | 'content_filter'
+  | 'timeout'
+  | 'no_progress'
+  | 'duplicate_call'
+  | 'round_limit'
+
+export interface TurnToolSummary {
+  id: string
+  name: string
+  writes: string[]
+  error?: string
+}
+
+/** v7.4：完全由真实 ToolResult 构建的本轮执行事实。 */
+export interface TurnSummary {
+  status: TurnStatus
+  stopReason: TurnStopReason
+  completedTools: TurnToolSummary[]
+  failedTools: TurnToolSummary[]
+  writes: string[]
+  warnings: string[]
+  assistantNote?: string
+  startedAt: number
+  finishedAt: number
+}
+
 /** 一次 processUserInput 的整体结果 */
 export interface DispatchResult {
   /** 整体调度是否成功 */
@@ -237,11 +261,8 @@ export interface DispatchResult {
   /** 最终回复消息 */
   response: string
 
-  /**
-   * v7.1 改动3：本轮结束时若引擎探测到"全部场记完成且仍处设计期"，置 true。
-   * chatStore 据此在对话流追加一张 stage_proposal 消息（StageCard）。
-   */
-  stageProposal?: boolean
+  /** v7.4：供 UI、持久化和后续审计使用的确定性结果。 */
+  summary?: TurnSummary
 }
 
 // ===== 执行事件（实时日志） =====
@@ -256,6 +277,7 @@ export type ExecutionEventType =
   | 'subagent_loop_start'   // v7.3：宽泛 subagent 专属循环开始
   | 'subagent_loop_step'    // v7.3：专属循环内一轮 read_file/read_reference（可选，用于展示进度）
   | 'subagent_loop_complete' // v7.3：专属循环结束，取得最终文本
+  | 'engine_finalizing'
   | 'engine_complete'
   | 'engine_error'
 

@@ -16,7 +16,22 @@ export function ExecutionLogCard({ executionLog, isProcessing, isExpanded, onTog
   if (steps.length === 0) return null
 
   const doneCount = steps.filter((s) => s.status === 'done').length
-  const summary = isProcessing && doneCount === 0 ? '处理中…' : `已完成 ${doneCount} 个步骤`
+  const errorCount = steps.filter((s) => s.status === 'error').length
+  const lastEvent = executionLog[executionLog.length - 1]
+  const isFinalizing = lastEvent?.type === 'engine_finalizing'
+  const firstTimestamp = executionLog[0]?.timestamp
+  const lastTimestamp = lastEvent?.timestamp
+  const elapsedSeconds = firstTimestamp && lastTimestamp
+    ? Math.max(0, Math.round((lastTimestamp - firstTimestamp) / 1000))
+    : 0
+  const terminalSummary = errorCount > 0
+    ? `${doneCount} 完成 / ${errorCount} 失败 · ${elapsedSeconds} 秒`
+    : `已完成 ${doneCount}/${steps.length} 个步骤 · ${elapsedSeconds} 秒`
+  const summary = isFinalizing
+    ? '正在整理本轮结果…'
+    : isProcessing
+      ? `处理中 · ${doneCount}/${steps.length}`
+      : terminalSummary
 
   return (
     <div className={styles.card}>

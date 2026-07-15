@@ -1,5 +1,7 @@
 .card {
-  margin: 6px 0 6px 36px;
+  width: calc(100% - 36px);
+  margin: 6px 36px 6px 0;
+  text-align: left;
   border: 1px solid var(--color-border);
   border-radius: 14px;
   background: var(--color-bg-tertiary);
@@ -17,6 +19,7 @@
   border: none;
   cursor: pointer;
   font-family: inherit;
+  text-align: left;
 }
 
 .headerTitle {
@@ -119,6 +122,7 @@
 
 .rowContent {
   min-width: 0;
+  text-align: left;
 }
 
 .rowTitle {

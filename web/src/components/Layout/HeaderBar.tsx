@@ -16,7 +16,7 @@ interface HeaderBarProps {
 /**
  * 顶栏（v7.1 改动1：瘦身）
  * 只保留：品牌标识 + 项目选择器/新建/删除 + 设置入口。
- * 产品选择器 → 下放到 ModeBar；阶段切换 → 下放到对话流 StageCard；进度概览 → 资产面板顶部。
+ * 产品选择器 → 下放到 ModeBar；设计完成校准与写作模式入口 → 资产面板顶部。
  */
 export function HeaderBar({
   title = 'StoryCrafter',

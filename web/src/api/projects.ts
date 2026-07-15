@@ -8,7 +8,6 @@ export interface ProjectMeta {
   description?: string
   productKind?: ProductKind
   phase?: StoryPhase
-  stageProposalPending?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -19,7 +18,6 @@ export interface ProjectPatch {
   /** null 表示项目尚未选择产品方向（用于新项目与旧数据迁移） */
   productKind?: ProductKind | null
   phase?: StoryPhase
-  stageProposalPending?: boolean
 }
 
 export function listProjects(): Promise<ProjectMeta[]> {
