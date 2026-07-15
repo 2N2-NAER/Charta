@@ -6,6 +6,7 @@ import { useAssetStore } from './assetStore'
 import { usePhaseStore } from './phaseStore'
 import { classifyLLMError } from '../utils/llmError'
 import { loadChat, appendChatMessage, appendChatEvent, clearChat } from '../api/chat'
+import { updateProject } from '../api/projects'
 
 // ===== 常量 =====
 
@@ -200,7 +201,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       persistMessage(errorMsg)
     } finally {
       // v6.6：同步产品锁定状态（reset_all 执行后会释放 profileLock，UI 须感知）
-      set({ isProcessing: false, product: _engine?.getProfile()?.kind ?? null })
+      const product = _engine?.getProfile()?.kind ?? null
+      const phase = usePhaseStore.getState().phase
+      set({ isProcessing: false, product })
+      // v7.4：覆盖 reset_all 等引擎内状态变更，保证重启后 profile/phase 可恢复。
+      if (_projectId) {
+        void updateProject(_projectId, { productKind: product, phase }).catch((e) =>
+          console.error('[chatStore] 持久化项目运行状态失败', e),
+        )
+      }
     }
   },
 
@@ -234,6 +243,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (_engine.getProfile() !== null) return
     _engine.lockProfile(kind)
     set({ product: kind })
+    if (_projectId) {
+      void updateProject(_projectId, { productKind: kind }).catch((e) =>
+        console.error('[chatStore] 持久化产品方向失败', e),
+      )
+    }
   },
 
   appendInputRaw: async (filename: string, content: string) => {
@@ -259,6 +273,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         createSystemMessage(`⚠️ ${e instanceof Error ? e.message : String(e)}`),
       )
       return
+    }
+    if (_projectId) {
+      try {
+        await updateProject(_projectId, { phase: usePhaseStore.getState().phase })
+      } catch (e) {
+        console.error('[chatStore] 持久化创作阶段失败', e)
+      }
     }
     // 该卡片置只读态，记录落定阶段
     set((state) => ({
