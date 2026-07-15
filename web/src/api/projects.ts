@@ -8,6 +8,7 @@ export interface ProjectMeta {
   description?: string
   productKind?: ProductKind
   phase?: StoryPhase
+  stageProposalPending?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -18,6 +19,7 @@ export interface ProjectPatch {
   /** null 表示 reset_all 后清除产品锁 */
   productKind?: ProductKind | null
   phase?: StoryPhase
+  stageProposalPending?: boolean
 }
 
 export function listProjects(): Promise<ProjectMeta[]> {
