@@ -39,7 +39,6 @@ projectsRouter.patch('/:id', (req, res) => {
       description?: string
       productKind?: 'novel' | 'screenplay' | 'long_drama' | 'short_drama' | null
       phase?: 'designing' | 'writing'
-      stageProposalPending?: boolean
     }
     const productKinds = new Set(['novel', 'screenplay', 'long_drama', 'short_drama'])
     if (
@@ -52,15 +51,6 @@ projectsRouter.patch('/:id', (req, res) => {
     }
     if (patch.phase !== undefined && patch.phase !== 'designing' && patch.phase !== 'writing') {
       res.status(400).json({ error: { kind: 'bad_request', message: '无效的 phase' } })
-      return
-    }
-    if (
-      patch.stageProposalPending !== undefined &&
-      typeof patch.stageProposalPending !== 'boolean'
-    ) {
-      res
-        .status(400)
-        .json({ error: { kind: 'bad_request', message: '无效的 stageProposalPending' } })
       return
     }
     res.json(updateProject(req.params.id, patch))

@@ -23,7 +23,7 @@ export const SUBAGENT_REASON: Record<string, string> = {
   reset_all: '重置全部故事资产',
 }
 
-/** subagentId → 单字图形图标（非 emoji，对齐 StageCard 单字图标风格） */
+/** subagentId → 单字图形图标（非 emoji，保持紧凑的单字标识风格） */
 export const SUBAGENT_GLYPH: Record<string, string> = {
   worldbuilding: '世',
   characters: '角',

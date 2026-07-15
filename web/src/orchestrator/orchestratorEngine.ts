@@ -1,5 +1,5 @@
 import type OpenAI from 'openai'
-import type { SubagentSpec, SkillSpec, ToolResult, DispatchResult, SchedulerState, ExecutionEvent, ExecutionEventCallback, ConversationTurn, AssetFileInfo } from '../types'
+import type { SubagentSpec, SkillSpec, ToolResult, DispatchResult, SchedulerState, ExecutionEvent, ExecutionEventCallback, ConversationTurn, AssetFileInfo, TurnStopReason } from '../types'
 import type { ProductProfile, ProductKind } from '../types/product'
 import { PRODUCT_PROFILES, WRITER_IDS, renderProductProfileXml } from '../types/product'
 import { getSubagent, getAvailableSubagents, buildFunctionSpec, getSkills, REFERENCE_CONTENTS } from '../skills/skillLoader'
@@ -12,10 +12,11 @@ import { usePhaseStore } from '../store/phaseStore'
 import { useSelfCheckStore } from '../store/selfCheckStore'
 import { classifyLLMError } from '../utils/llmError'
 import orchestratorPromptRaw from '../llm/prompts/orchestrator_v5.md?raw'
-import { runAgentLoop, SUBAGENT_LOOP_MAX_ROUNDS, SAFETY_MAX_ROUNDS } from './agentLoop'
+import { runAgentLoop, SUBAGENT_LOOP_MAX_ROUNDS } from './agentLoop'
 import { READ_FILE_TOOL, READ_REFERENCE_TOOL } from './readTools'
 import { auditStructure, type StructuralIssue } from '../skills/checker/structuralAudit'
 import { buildProjectStatusSnapshot, isProjectStatusQuery } from './projectStatus'
+import { buildTurnSummary, renderTurnSummary, type ExecutedToolResult } from './turnSummary'
 
 type ChatCompletionMessageParam = OpenAI.Chat.Completions.ChatCompletionMessageParam
 
@@ -24,9 +25,12 @@ type ChatCompletionMessageParam = OpenAI.Chat.Completions.ChatCompletionMessageP
 const MAX_RETRIES = 3
 const MAX_TOOLS_PER_ROUND = 5
 const CONTEXT_LIMIT_CHARS = 22_000 // deepseek-v4-flash 32K 的 ~70%
+const MAIN_LOOP_MAX_ROUNDS = 10
+const TURN_TIMEOUT_MS = 5 * 60 * 1000
+const MAX_NO_PROGRESS_ROUNDS = 2
 
 /** v7.3：统一并发池上限（构筑/写作 subagent 批量调度共用） */
-const BATCH_CONCURRENCY = 50
+const BATCH_CONCURRENCY = 5
 
 /** 创作 Subagent ID 列表（用于后处理判断是否需要更新需求状态，以及设计期/写作期可见性管控） */
 const CREATIVE_TOOL_IDS = [
@@ -320,6 +324,14 @@ function loadOrchestratorPrompt(tools: object[]): string {
 /** 截断字符串到指定长度，超出加省略号（v7.2：执行日志时间线副标题用） */
 function truncate(text: string, maxLen: number): string {
   return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text
+}
+
+function normalizeCallText(text: string): string {
+  return text.trim().toLowerCase().replace(/[\s，。！？、；：,.!?;:]+/g, ' ')
+}
+
+function buildToolCallSignature(toolId: string, target: string, instruction: string): string {
+  return `${toolId}:${target.trim().toUpperCase()}:${normalizeCallText(instruction)}`
 }
 
 // ===== 上下文管理 =====
@@ -1160,24 +1172,6 @@ export class OrchestratorEngine {
     return [...set].sort()
   }
 
-  /**
-   * v7.1 改动3：只读探测——是否到了"该开写"的时机（供 processUserInput 结束时置 stageProposal）。
-   *
-   * 条件：仍处设计期 + sequence_list.md 能解析出 ≥1 个 seqId + 每个 seqId 对应的
-   * sequences/<id>.md 均已落盘且非空。纯读、不改任何状态，与 phaseStore.lock 前置校验解耦。
-   */
-  private async probeAllScenesReady(): Promise<boolean> {
-    if (!usePhaseStore.getState().isDesigning()) return false
-    const seqListMd = await safeRead(this.fileManager, 'sequence_list.md')
-    const seqIds = this.parseSequenceIds(seqListMd)
-    if (seqIds.length === 0) return false
-    for (const id of seqIds) {
-      const c = await safeRead(this.fileManager, `sequences/${id}.md`)
-      if (!c || c.trim().length === 0) return false
-    }
-    return true
-  }
-
   /** v6.7 建档骨架：带标题占位，让 UI 立即出现卡片 */
   private buildSequenceSkeleton(seqId: string): string {
     return `<<<SCENE_BEAT_OUTLINE_START>>>\n# ${seqId}\n\n### 场景表\n\n*（生成中…）*\n\n### 节拍\n\n*（生成中…）*\n<<<SCENE_BEAT_OUTLINE_END>>>`
@@ -1821,6 +1815,30 @@ export class OrchestratorEngine {
     return line ? line.trim() : sc
   }
 
+  /** v7.4：非关键收尾。失败只进入最终总结 warning，不再阻塞或吞掉用户结果。 */
+  private async syncRequirementStatuses(state: SchedulerState): Promise<string[]> {
+    if (!state.toolsCalled.some((id) => CREATIVE_TOOL_IDS.includes(id))) return []
+
+    const reqTool = getSubagent('user_requirements_analyzer')
+    if (!reqTool) return []
+
+    const successWrites = state.toolResults
+      .filter((result) => result.success && result.writes && result.writes.length > 0)
+      .flatMap((result) => result.writes ?? [])
+    if (successWrites.length === 0) return []
+
+    const statusInstruction =
+      `根据本轮执行结果更新 user_requirements.md 的状态标记。已成功写入：${successWrites.join('、')}。` +
+      '请将其中已实现的需求标记为 ✅，仍未实现的需求保持 ⬜。仅更新状态标记，不修改需求内容。'
+
+    try {
+      const result = await this.executeTool(reqTool, statusInstruction)
+      return result.success ? [] : [`需求状态同步失败：${result.error ?? '未知错误'}`]
+    } catch (error) {
+      return [`需求状态同步失败：${error instanceof Error ? error.message : String(error)}`]
+    }
+  }
+
   /**
    * 处理用户输入
    *
@@ -1850,7 +1868,6 @@ export class OrchestratorEngine {
         success: true,
         results: [],
         response: projectStatus.markdown,
-        stageProposal: await this.probeAllScenesReady(),
       }
     }
 
@@ -1966,13 +1983,57 @@ export class OrchestratorEngine {
     // ④ 调度状态
     const state: SchedulerState = {
       currentRound: 0,
-      maxRounds: SAFETY_MAX_ROUNDS,
+      maxRounds: MAIN_LOOP_MAX_ROUNDS,
       toolsCalled: [],
       toolResults: [],
     }
 
-    // ⑤ FC 调度循环（v7.3：取消业务轮次上限，仅留安全阀防死循环）
+    const turnStartedAt = Date.now()
+    const executions: ExecutedToolResult[] = []
+    const successfulSignatures = new Set<string>()
+    const failureCounts = new Map<string, number>()
+    let noProgressRounds = 0
+
+    /** v7.4：所有退出分支都走同一个确定性收口，保证日志后必有一条结果消息。 */
+    const finalizeTurn = async (
+      stopReason: TurnStopReason,
+      assistantNote?: string,
+    ): Promise<DispatchResult> => {
+      this.emit('engine_finalizing', { message: '正在整理本轮结果…' })
+
+      const extraWarnings = await this.syncRequirementStatuses(state)
+      const summary = buildTurnSummary({
+        executions,
+        stopReason,
+        assistantNote,
+        extraWarnings,
+        startedAt: turnStartedAt,
+        finishedAt: Date.now(),
+      })
+
+      this.emit('engine_complete', {
+        message: summary.status === 'completed'
+          ? `本轮已完成（${summary.completedTools.length} 个工具）`
+          : summary.status === 'partial'
+            ? `本轮部分完成（${summary.completedTools.length} 个成功，${summary.failedTools.length} 个失败）`
+            : summary.status === 'interrupted'
+              ? '本轮已自动中止，已保留成功写入'
+              : '本轮未完成',
+      })
+
+      return {
+        success: summary.status === 'completed' || summary.status === 'partial',
+        results: state.toolResults,
+        response: renderTurnSummary(summary),
+        summary,
+      }
+    }
+
+    // ⑤ FC 调度循环（v7.4：有界轮次 + 时间/重复/无进展三重保护）
     while (state.currentRound < state.maxRounds) {
+      if (Date.now() - turnStartedAt >= TURN_TIMEOUT_MS) {
+        return finalizeTurn('timeout')
+      }
 
       // 上下文管理：检查 token 是否超限
       if (estimateTokens(messages) > CONTEXT_LIMIT_CHARS) {
@@ -1994,11 +2055,7 @@ export class OrchestratorEngine {
         this.emit('engine_error', {
           message: `处理异常: ${(e as Error).message}`,
         })
-        return {
-          success: false,
-          results: state.toolResults,
-          response: `系统响应异常: ${(e as Error).message}`,
-        }
+        return finalizeTurn('error', `系统响应异常：${(e as Error).message}`)
       }
 
       const { message, finish_reason } = response
@@ -2006,41 +2063,16 @@ export class OrchestratorEngine {
       // 处理 finish_reason
       switch (finish_reason) {
         case 'stop':
-          // LLM 决定不再调工具 → 返回文本给用户
-          this.emit('engine_complete', {
-            message: state.toolsCalled.length > 0
-              ? `已完成 ${state.toolsCalled.length} 个工具调用`
-              : '处理完成',
-          })
-
-          // 后处理：如果有创作 Subagent 被执行，自动更新 user_requirements.md 的状态标记
-          if (state.toolsCalled.some(id => CREATIVE_TOOL_IDS.includes(id))) {
-            const reqTool = getSubagent('user_requirements_analyzer')
-            if (reqTool) {
-              const successTools = state.toolResults
-                .filter(r => r.success && r.writes && r.writes.length > 0)
-                .map(r => r.writes!.join(', '))
-                .filter(Boolean)
-
-              if (successTools.length > 0) {
-                const statusInstruction = `根据本轮执行结果更新 user_requirements.md 的状态标记。已成功写入：${successTools.join('；')}。请将其中已实现的需求标记为 ✅，仍未实现的需求保持 ⬜。仅更新状态标记，不修改需求内容。`
-                await this.executeTool(reqTool, statusInstruction)
-              }
-            }
-          }
-
-          return {
-            success: true,
-            results: state.toolResults,
-            response: message.content || '处理完成',
-            stageProposal: await this.probeAllScenesReady(),
-          }
+          return finalizeTurn('normal', message.content ?? undefined)
 
         case 'tool_calls': {
           const toolCalls = message.tool_calls
           if (!toolCalls || toolCalls.length === 0) {
-            // 没有 tool_calls 但 finish_reason 是 tool_calls → 异常
             state.currentRound++
+            noProgressRounds++
+            if (noProgressRounds >= MAX_NO_PROGRESS_ROUNDS) {
+              return finalizeTurn('no_progress')
+            }
             continue
           }
 
@@ -2051,23 +2083,16 @@ export class OrchestratorEngine {
           messages.push({
             role: 'assistant' as const,
             content: message.content,
-            tool_calls: toolCalls,
+            tool_calls: callsToProcess,
           } as ChatCompletionMessageParam)
+
+          let roundHadProgress = false
+          let roundSawDuplicate = false
 
           // 串行执行每个 Subagent
           for (const toolCall of callsToProcess) {
             const toolId = toolCall.function.name
             const subagentSpec = getSubagent(toolId)
-
-            if (!subagentSpec) {
-              // 未知 Subagent → 返回错误
-              messages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id,
-                content: JSON.stringify({ success: false, error: `未知工具: ${toolId}` }),
-              } as ChatCompletionMessageParam)
-              continue
-            }
 
             // 解析 instruction + v6.1 动态靶参数（target_sequence / target_chapter 由 buildFunctionSpec
             // 条件附加给 NEEDS_TARGET_PARAM 白名单成员；其它 subagent 不携带此字段，空串无影响）
@@ -2081,6 +2106,32 @@ export class OrchestratorEngine {
               instruction = toolCall.function.arguments || ''
             }
 
+            const signature = buildToolCallSignature(toolId, argTarget, instruction)
+            const repeatedFailure = (failureCounts.get(signature) ?? 0) >= 2
+            if (successfulSignatures.has(signature) || repeatedFailure) {
+              roundSawDuplicate = true
+              messages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({
+                  success: false,
+                  skipped: true,
+                  error: repeatedFailure ? '同一调用已连续失败两次' : '同一调用已成功执行',
+                }),
+              } as ChatCompletionMessageParam)
+              continue
+            }
+
+            if (!subagentSpec) {
+              // 未知 Subagent → 返回错误
+              messages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({ success: false, error: `未知工具: ${toolId}` }),
+              } as ChatCompletionMessageParam)
+              continue
+            }
+
             // 执行 Subagent（history 仅 analyzer 前置预跑需要；第 4 可选项承载动态靶供
             // executeTool 内 resolveWriteTarget / runSequencePipeline 消费）
             this.emit('tool_start', {
@@ -2092,13 +2143,28 @@ export class OrchestratorEngine {
               instruction: instruction ? truncate(instruction, 40) : undefined,
             })
 
-            const result = await this.executeTool(subagentSpec, instruction, undefined, {
-              target: argTarget,
-            })
+            let result: ToolResult
+            try {
+              result = await this.executeTool(subagentSpec, instruction, undefined, {
+                target: argTarget,
+              })
+            } catch (error) {
+              result = {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            }
             state.toolResults.push(result)
             state.toolsCalled.push(subagentSpec.id)
+            executions.push({
+              toolId: subagentSpec.id,
+              toolName: subagentSpec.name,
+              result,
+            })
 
             if (result.success) {
+              successfulSignatures.add(signature)
+              roundHadProgress = true
               const warnCount = result.warnings?.length ?? 0
               this.emit('tool_complete', {
                 toolId: subagentSpec.id,
@@ -2113,6 +2179,7 @@ export class OrchestratorEngine {
                 warnings: result.warnings,
               })
             } else {
+              failureCounts.set(signature, (failureCounts.get(signature) ?? 0) + 1)
               this.emit('tool_error', {
                 toolId: subagentSpec.id,
                 toolName: subagentSpec.name,
@@ -2144,60 +2211,42 @@ export class OrchestratorEngine {
           // v5：不再重算可用 Subagent（全部始终可见）
 
           state.currentRound++
+
+          if (Date.now() - turnStartedAt >= TURN_TIMEOUT_MS) {
+            return finalizeTurn('timeout')
+          }
+
+          if (roundHadProgress) {
+            noProgressRounds = 0
+          } else {
+            noProgressRounds++
+          }
+
+          if (roundSawDuplicate && !roundHadProgress) {
+            return finalizeTurn('duplicate_call')
+          }
+          if (noProgressRounds >= MAX_NO_PROGRESS_ROUNDS) {
+            return finalizeTurn('no_progress')
+          }
           break
         }
 
         case 'length':
-          return {
-            success: false,
-            results: state.toolResults,
-            response: state.toolResults.length > 0
-              ? '响应过长已截断，已执行的部分已完成'
-              : '请求过长，请简化后重试',
-          }
+          return finalizeTurn('length')
 
         case 'content_filter':
-          return {
-            success: false,
-            results: state.toolResults,
-            response: '内容被安全过滤，请调整表达方式后重试',
-          }
+          return finalizeTurn('content_filter')
 
         default:
-          // 未知 finish_reason
           state.currentRound++
+          noProgressRounds++
+          if (noProgressRounds >= MAX_NO_PROGRESS_ROUNDS) {
+            return finalizeTurn('no_progress')
+          }
           continue
       }
     }
 
-    // 超过安全轮次上限 → 兜底强制结束
-    const timeoutMsg = `已执行 ${state.toolsCalled.length} 个工具（达安全轮次上限），请继续补充剩余需求。`
-
-    this.emit('engine_complete', {
-      message: timeoutMsg,
-    })
-
-    // 后处理：如果有创作 Subagent 被执行，自动更新 user_requirements.md 的状态标记
-    if (state.toolsCalled.some(id => CREATIVE_TOOL_IDS.includes(id))) {
-      const reqTool = getSubagent('user_requirements_analyzer')
-      if (reqTool) {
-        const successTools = state.toolResults
-          .filter(r => r.success && r.writes && r.writes.length > 0)
-          .map(r => r.writes!.join(', '))
-          .filter(Boolean)
-
-        if (successTools.length > 0) {
-          const statusInstruction = `根据本轮执行结果更新 user_requirements.md 的状态标记。已成功写入：${successTools.join('；')}。请将其中已实现的需求标记为 ✅，仍未实现的需求保持 ⬜。仅更新状态标记，不修改需求内容。`
-          await this.executeTool(reqTool, statusInstruction)
-        }
-      }
-    }
-
-    return {
-      success: true,
-      results: state.toolResults,
-      response: timeoutMsg,
-      stageProposal: await this.probeAllScenesReady(),
-    }
+    return finalizeTurn('round_limit')
   }
 }

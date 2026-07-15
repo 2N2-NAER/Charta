@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { ChatMessage } from '../../types'
 import { useChatStore } from '../../store/chatStore'
-import { StageCard } from './StageCard'
 import { ExecutionLogCard } from './ExecutionLogCard'
 import styles from './ChatHistory.module.css'
 
@@ -38,8 +39,10 @@ interface ChatHistoryProps {
 export function ChatHistory({ messages }: ChatHistoryProps) {
   const isProcessing = useChatStore((s) => s.isProcessing)
   const executionLog = useChatStore((s) => s.executionLog)
+  const executionTurnId = useChatStore((s) => s.executionTurnId)
   const isLogExpanded = useChatStore((s) => s.isLogExpanded)
   const toggleLogExpanded = useChatStore((s) => s.toggleLogExpanded)
+  const isFinalizing = executionLog[executionLog.length - 1]?.type === 'engine_finalizing'
 
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -58,24 +61,37 @@ export function ChatHistory({ messages }: ChatHistoryProps) {
   }
 
   // ===== 渲染 =====
+  const currentResultIndex = executionTurnId
+    ? messages.findIndex((msg) => msg.kind === 'turn_result' && msg.turnId === executionTurnId)
+    : -1
+  const messagesBeforeLog = currentResultIndex >= 0
+    ? messages.slice(0, currentResultIndex)
+    : messages
+  const messagesAfterLog = currentResultIndex >= 0
+    ? messages.slice(currentResultIndex)
+    : []
+
+  const renderMessage = (msg: ChatMessage) => (
+    <div key={msg.id} className={`${styles.message} ${msg.role === 'user' ? styles.user : styles.system}`}>
+      <span className={`${styles.tag} ${getRoleClass(msg.role)}`}>
+        {getRoleLabel(msg.role)}
+      </span>
+      <div className={styles.content}>
+        {msg.role === 'system' ? (
+          <div className={`${styles.text} ${styles.markdown}`}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+          </div>
+        ) : (
+          <div className={styles.text}>{msg.content}</div>
+        )}
+        <span className={styles.time}>{formatTime(msg.timestamp)}</span>
+      </div>
+    </div>
+  )
+
   return (
     <div className={styles.container}>
-      {messages.map((msg) =>
-        // v7.1 改动3：stage_proposal 消息渲染为交互式 StageCard，其余走普通气泡
-        msg.kind === 'stage_proposal' ? (
-          <StageCard key={msg.id} msg={msg} />
-        ) : (
-          <div key={msg.id} className={`${styles.message} ${msg.role === 'user' ? styles.user : styles.system}`}>
-            <span className={`${styles.tag} ${getRoleClass(msg.role)}`}>
-              {getRoleLabel(msg.role)}
-            </span>
-            <div className={styles.content}>
-              <div className={styles.text}>{msg.content}</div>
-              <span className={styles.time}>{formatTime(msg.timestamp)}</span>
-            </div>
-          </div>
-        ),
-      )}
+      {messagesBeforeLog.map(renderMessage)}
 
       {/* v7.2：执行日志时间线卡片 */}
       <ExecutionLogCard
@@ -85,6 +101,8 @@ export function ChatHistory({ messages }: ChatHistoryProps) {
         onToggle={toggleLogExpanded}
       />
 
+      {messagesAfterLog.map(renderMessage)}
+
       {/* v7.1 改动4：处理中呼吸灯（不刷事件流） */}
       {isProcessing && (
         <div className={styles.processing}>
@@ -93,7 +111,7 @@ export function ChatHistory({ messages }: ChatHistoryProps) {
             <span />
             <span />
           </span>
-          <span>创作中…</span>
+          <span>{isFinalizing ? '正在整理本轮结果…' : '创作中…'}</span>
         </div>
       )}
 

@@ -10,8 +10,12 @@ server/data
 server/dist
 server/node_modules
 
-# 设计文档（内部资料，不上传）
-_design_docs/
+# 设计文档（历史内部资料默认不上传；当前权威瘦身方案纳入版本管理）
+_design_docs/*
+!_design_docs/v7.4-对话执行收口优化/
+!_design_docs/v7.4-对话执行收口优化/README.md
+!_design_docs/v7.5-瘦身专项/
+!_design_docs/v7.5-瘦身专项/README.md
 
 # 内部资料，不上传
 AGENTS.md
