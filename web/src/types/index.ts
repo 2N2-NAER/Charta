@@ -3,7 +3,7 @@
 /**
  * Subagent 身份卡（取代 v5 的 ToolSpec）
  *
- * 四层框架：Orchestrator → Subagent → Skill Router → Skill
+ * 四层框架：Orchestrator → Subagent → Skill
  * Subagent 是 Orchestrator 通过 Function Calling 选择的单元，
  * 具体执行由其名下的 Skill 承载（见 SkillSpec）。
  * 磁盘表示：src/skills/<id>/subagent.md（frontmatter + 角色前缀正文）。
@@ -52,10 +52,10 @@ export interface SkillSpec {
   /** 人类可读名称 */
   name: string
 
-  /** 供 Skill Router 在 ≥2 skill 时选择的描述 */
+  /** Skill 描述（用于展示、日志与独立上下文目标判定） */
   description: string
 
-  /** 可选：Skill Router 的确定性关键词命中 */
+  /** 可选：独立上下文用来判定本轮输出目标的关键词 */
   when: string[]
 
   /**

@@ -3,7 +3,6 @@ import type { SubagentSpec, SkillSpec, ToolResult, DispatchResult, SchedulerStat
 import type { ProductProfile, ProductKind } from '../types/product'
 import { PRODUCT_PROFILES, WRITER_IDS, renderProductProfileXml } from '../types/product'
 import { getSubagent, getAvailableSubagents, buildFunctionSpec, getSkills, REFERENCE_CONTENTS } from '../skills/skillLoader'
-import { selectSkill } from './skillRouter'
 import { assembleContext, buildAgentPrompt, wrapFileAsXml } from './contextAssembler'
 import { validateOutput, extractMultiFileOutput } from './outputValidator'
 import type { LLMClient } from '../llm/client'
@@ -66,6 +65,14 @@ function getWriterOutputKind(profile: ProductProfile | null, skillId: string): W
   if (profile.kind === 'short_drama') return 'short_drama_script'
   if (profile.kind === 'long_drama') return 'long_drama_script'
   return 'film_script'
+}
+
+function getDefaultSkill(subagentId: string): SkillSpec {
+  const skills = getSkills(subagentId)
+  if (skills.length === 0) {
+    throw new Error(`[skillResolver] Subagent "${subagentId}" 没有可用 Skill`)
+  }
+  return skills[0]
 }
 
 function isPrimaryWritingAssetPath(path: string): boolean {
@@ -409,7 +416,7 @@ export class OrchestratorEngine {
   }
 
   /**
-   * 执行单个 Subagent（v5.3 四层框架：Subagent → Skill Router → Skill，含重试逻辑）
+   * 执行单个 Subagent（v7.3 后：Subagent 直接绑定 Skill；宽泛 Subagent 走独立上下文目标解析）
    *
    * v6.1 扩展点：
    *   - 第 4 可选参 options.target 承载 FC args.target_{sequence|chapter}，由 processUserInput
@@ -537,9 +544,8 @@ export class OrchestratorEngine {
     }
 
     // ===== 单 Skill 直发路径 =====
-    // ① Skill Router：在该 Subagent 名下选出最合适的 Skill
-    //    单 Skill 时零成本直选、不调 LLM；≥2 candidate 时按 when/description 打分择优
-    const skill = selectSkill(subagent.id, instruction)
+    // ① v7.3 后撤销旧技能分流层：非隔离 Subagent 均按注册顺序使用默认 Skill。
+    const skill = getDefaultSkill(subagent.id)
 
     // ② 读上下文（按 Skill.reads，支持 /*.md glob 展开 v6.3）
     const files: Record<string, string> = {}
@@ -1094,7 +1100,7 @@ export class OrchestratorEngine {
     history: ConversationTurn[] | undefined,
     episodeRange: Map<string, [number, number]>,
   ): Promise<ToolResult> {
-    const skill = selectSkill(subagent.id, instruction)
+    const skill = this.resolvePrimaryScriptSkill() ?? getDefaultSkill(subagent.id)
     const chapterPath = this.resolveWriterOutputPath(seqId, skill, episodeRange)
     const splitUnit = this.profileLock?.proseSplitUnit ?? 'none'
     const seqBeatsDoc = await safeRead(this.fileManager, `sequences/${seqId}.md`)
@@ -1424,8 +1430,8 @@ export class OrchestratorEngine {
   }
 
   /**
-   * v7.3：从 instruction 中解析本次目标层/文体——按预装 skill 各自的 `when` 关键词命中数打分，
-   * 命中最多的一份胜出；全零命中时回退到 outputTags 是否已出现在 finalText 里做兜底判断
+   * v7.3：独立上下文完成后解析本次输出目标——优先按预装 skill 的 `when` 关键词命中，
+   * 再回退到 outputTags 是否已出现在 finalText 里做兜底判断
    * （LLM 产出的 TAG 通常与它实际选用的规则一致，即使 instruction 没给出明确关键词）；
    * 仍无法判定则回退到预装列表第一项，保证行为始终可预测。
    */

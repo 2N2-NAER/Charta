@@ -8,7 +8,7 @@ type ChatCompletionTool = OpenAI.Chat.Completions.ChatCompletionTool
 /**
  * SkillLoader — 四层框架的加载与注册中枢（v5.3）
  *
- * Orchestrator → Subagent → Skill Router → Skill
+ * Orchestrator → Subagent → Skill
  *
  * 磁盘约定（热插拔）：
  *   src/skills/<subagentId>/subagent.md          — Subagent manifest（frontmatter + 角色前缀）
@@ -270,7 +270,7 @@ function buildReferenceContents(
 export const REFERENCE_CONTENTS: Map<string, string> = buildReferenceContents(referenceModules)
 
 // v7.1 M5：可变 registry——boot 时 loadUserSkills() 把 server/data/skills/ 用户源 overlay 到内置源。
-// export let 提供 live binding：重新赋值后引用方（assetStore/skillRouter/orchestratorEngine）拿到新值。
+// export let 提供 live binding：重新赋值后引用方（assetStore/skillResolver/orchestratorEngine）拿到新值。
 export let SUBAGENT_REGISTRY: SubagentSpec[] = builtIn.subagents
 export let SKILLS_BY_SUBAGENT: Map<string, SkillSpec[]> = builtIn.skillsBySubagent
 

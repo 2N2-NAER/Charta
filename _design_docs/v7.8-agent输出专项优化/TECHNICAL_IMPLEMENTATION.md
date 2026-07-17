@@ -599,14 +599,15 @@ private resolveVideoProductDir(): 'short_drama' | 'long_drama' | 'film' {
 
 ### 5.3 生成视频脚本前自动补剧本
 
-在 `runWriterSequencePipeline` 中选出 skill 后增加判断：
+v7.3 已撤销旧技能分流层，因此这里不再引入运行时技能分流函数。
+写作 agent 进入独立上下文后，由产品档案先过滤可用规则，再通过输出标签和用户意图做目标判定：
 
-```ts
-const skill = selectSkill(subagent.id, instruction)
-if (skill.skillId === 'video_shot_script_rules') {
-  return this.runVideoScriptPipeline(subagent, seqId, instruction, history, episodeRange)
-}
-```
+- 小说：只开放 `novel_prose_rules`
+- 短剧：开放 `short_drama_script_rules` 与 `video_shot_script_rules`
+- 长剧：开放 `long_drama_script_rules` 与 `video_shot_script_rules`
+- 电影：开放 `film_script_rules` 与 `video_shot_script_rules`
+
+当用户意图命中视频脚本，且当前产品不是小说时，先检查对应产品剧本是否存在；缺失则先补产品剧本，再生成视频脚本。
 
 新增：
 
@@ -632,7 +633,7 @@ private async runVideoScriptPipeline(
 
 ```ts
 private async runVideoScriptPipeline(...) {
-  const videoSkill = selectSkill(subagent.id, '视频脚本 分镜 镜头')
+  const videoSkill = getSkills('prose_writer').find(s => s.skillId === 'video_shot_script_rules')
   const scriptSkill = this.resolvePrimaryScriptSkillForProfile()
   const scriptPath = this.resolveWriterOutputPath(seqId, scriptSkill, episodeRange)
 
@@ -728,9 +729,9 @@ function isPrimaryWritingAssetPath(path: string): boolean {
 
 `previous_chapter_draft` 改名可以后续处理，第一阶段可保持标签名不变，只改内容来源。
 
-## 6. Skill Router 调整
+## 6. 独立上下文目标判定调整
 
-当前 `selectSkill` 根据 `when` 与 description 打分。新增 skill 后需要避免“电影剧本”误命中短剧规则。
+v7.3 已撤销旧技能分流层。新增 skill 后，需要避免“电影剧本”误命中短剧规则，因此 writer 不做全局 skill 分流，而是先按当前产品档案过滤候选规则。
 
 建议补充强约束：
 
@@ -752,16 +753,9 @@ function filterWriterSkillsByProfile(skills: SkillSpec[], profile: ProductProfil
 
 调用位置：
 
-- 可在 `selectSkill` 增加可选 profile 参数。
-- 或在 orchestrator 的 writer 分支里先过滤 skills，再复用评分逻辑。
-
-第一阶段建议保守改：
-
-```ts
-selectWriterSkill(subagent.id, instruction, this.profileLock)
-```
-
-避免影响其他 subagent。
+- `runSubagentWithIsolatedContext` 拼装 writer 独立上下文前，调用 `filterWriterSkillsByProfile`。
+- `resolveTargetSkill` 只在已经过滤后的候选规则里做输出目标判定。
+- 非隔离 subagent 不经过技能分流，按注册的默认 skill 执行。
 
 ## 7. 资产面板与状态统计调整
 
@@ -956,7 +950,7 @@ npm run build
 
 | 风险 | 说明 | 规避 |
 |---|---|---|
-| Skill 误路由 | “剧本”可能命中短剧/电影冲突 | writer skill 按产品先过滤 |
+| Skill 误匹配 | “剧本”可能命中短剧/电影冲突 | writer skill 按产品先过滤 |
 | 视频脚本覆盖剧本 | 原 writes 都是 `chapters/` | 视频脚本独立写 `video_scripts/<product>/` |
 | 旧项目断裂 | 历史正文在 `chapters/` | 保留旧目录读取与展示 |
 | 电影命名不一致 | 代码内部 `screenplay`，用户口径“电影” | 第一阶段内部兼容，路径使用 `film_scripts/` |
