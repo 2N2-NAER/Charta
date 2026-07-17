@@ -1,31 +1,52 @@
 /**
- * readTools.ts — asset_shell / read_reference 通用工具 schema
+ * readTools.ts — read_file / read_reference 通用工具 schema（v7.3 新增）
  *
  * 两个工具供宽泛 subagent 在其专属多轮循环中使用：
- * - asset_shell：在项目资产内执行受控只读查询命令
+ * - read_file：读取任意已知资产文件的完整内容
  * - read_reference：读取当前 Skill 自己 references/ 目录下的一个参考文件
+ *
+ * 与 agentLoop.ts 配合：schema 供 runAgentLoop 的 tools 参数使用，
+ * 具体执行逻辑由 orchestratorEngine.ts 的 isolated subagent 工具回调绑定。
  */
 
 import type OpenAI from 'openai'
 
 type ChatCompletionTool = OpenAI.Chat.Completions.ChatCompletionTool
 
-export const ASSET_SHELL_TOOL: ChatCompletionTool = {
+export const READ_FILE_TOOL: ChatCompletionTool = {
   type: 'function',
   function: {
-    name: 'asset_shell',
+    name: 'read_file',
     description:
-      '在当前项目资产目录内执行只读查询命令。支持 ls、find、grep、cat、head、tail、sed -n、wc。禁止写入、删除、网络访问、绝对路径、父级路径和命令拼接。',
+      '读取一个已知资产文件的完整内容。path 为资产文件路径，如 sequences/S1-1.md、characters.md 等。',
     parameters: {
       type: 'object',
       properties: {
-        command: {
+        path: {
           type: 'string',
-          description:
-            '只读资产查询命令，如 `ls`、`grep -n "女主" characters.md`、`sed -n "20,80p" sequence_list.md`、`tail -n 80 novel_chapters/S1-1.md`。',
+          description: '资产文件路径，如 sequences/S1-1.md、worldbuilding.md',
         },
       },
-      required: ['command'],
+      required: ['path'],
+    },
+  },
+}
+
+export const READ_SKILL_TOOL: ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'read_skill',
+    description:
+      '读取当前 Subagent 下某个 Skill 的完整执行规范。必须先从 skill_index 中选择 skillId。',
+    parameters: {
+      type: 'object',
+      properties: {
+        skillId: {
+          type: 'string',
+          description: '要读取的 Skill ID，如 short_drama_script_rules',
+        },
+      },
+      required: ['skillId'],
     },
   },
 }
