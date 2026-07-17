@@ -85,7 +85,7 @@ export function appendEvent(projectId: string, event: unknown): Promise<void> {
   })
 }
 
-/** 清空对话（不清资产），reset_all 用 */
+/** 清空对话（不清资产） */
 export function clearChat(projectId: string): Promise<void> {
   return enqueue(projectId, () => {
     const ch = chatHistoryPath(projectId)

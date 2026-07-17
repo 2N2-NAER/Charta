@@ -5,7 +5,7 @@
  * 它是 v6.6 一切模式差异的唯一真源（single source of truth）：
  *   - buildFunctionSpec 据它决定成文区暴露哪个 writer
  *   - 设计区各 Subagent 据 <product_profile> 注入的区间/语义生成结构
- *   - scene_beats Pipeline 据它注入场景数/节拍数/词库
+ *   - sequence_builder 据它注入场景数/节拍数/词库
  *   - validator 据它切换节拍词库与相邻同类型约束
  *
  * 守 INV-3：本文件独立于 types/index.ts，不污染既有 SkillSpec/SubagentSpec；
@@ -67,9 +67,6 @@ export interface ProductProfile {
   /** 成文一次调用产出是否可能超单次 LLM 稳定上限 → 是则启用分段续写（长剧按场景、短剧按集） */
   proseSplitUnit: 'none' | 'scene' | 'episode'
 
-  // === 运行时记忆窗口（Wave 6 消费，供 LRU/裁剪档案化）===
-  behaviorTrackWindow: number // behaviorTrack 保留条数（短剧 100 集需更大窗口）
-
   // === 校验 ===
   validation: ValidationSet
 }
@@ -92,7 +89,7 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
     proseUnit: 'chapter', narrativeMode: 'unfold',
     allowInnerMonologue: true,
     outputAnnotations: ['behavior_track', 'foreshadow'],
-    proseSplitUnit: 'none', behaviorTrackWindow: 8,
+    proseSplitUnit: 'none',
     // 小说节拍是「叙事节拍」，不套剧作张力五分法，也不强制相邻不同类型
     validation: { beatTypeVocab: ['铺垫', '推进', '转折', '高潮', '沉淀', '留白'], enforceAdjacentTypeRule: false },
   },
@@ -109,7 +106,7 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
     proseUnit: 'sequence', narrativeMode: 'unfold',
     allowInnerMonologue: false,
     outputAnnotations: ['behavior_track', 'foreshadow'],
-    proseSplitUnit: 'none', behaviorTrackWindow: 8,
+    proseSplitUnit: 'none',
     validation: { beatTypeVocab: ['铺垫', '触发', '对抗', '转折', '收束'], enforceAdjacentTypeRule: true },
   },
 
@@ -125,7 +122,7 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
     proseUnit: 'episode', narrativeMode: 'unfold',
     allowInnerMonologue: false,
     outputAnnotations: ['behavior_track', 'foreshadow'],
-    proseSplitUnit: 'scene', behaviorTrackWindow: 12,  // 单集 5-10 场景可能超限 → 按场景分段续写
+    proseSplitUnit: 'scene',  // 单集 5-10 场景可能超限 → 按场景分段续写
     validation: { beatTypeVocab: ['铺垫', '触发', '对抗', '转折', '收束'], enforceAdjacentTypeRule: true },
   },
 
@@ -142,7 +139,7 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
     proseUnit: 'sequence_of_episodes', narrativeMode: 'pulse',
     allowInnerMonologue: false,
     outputAnnotations: ['behavior_track', 'shot_breakdown', 'foreshadow'],
-    proseSplitUnit: 'episode', behaviorTrackWindow: 20,  // 一序列 8-15 集必超单次上限 → 按集分段续写
+    proseSplitUnit: 'episode',  // 一序列 8-15 集必超单次上限 → 按集分段续写
     validation: {
       beatTypeVocab: ['铺垫', '触发', '对抗', '转折', '收束', '钩子', '摩擦', '尖峰', '钉'],
       enforceAdjacentTypeRule: true,
@@ -150,8 +147,8 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
   },
 }
 
-/** 全部成文 writer 的 Subagent id（供 FC 裁剪 / Phase 判定 / target 协议统一引用）*/
-export const WRITER_IDS: readonly string[] = Object.values(PRODUCT_PROFILES).map((p) => p.writerSubagentId)
+/** 成文 writer Subagent id（供 FC 裁剪 / Phase 判定 / target 协议统一引用；多个产品可绑定同一 writer）*/
+export const WRITER_IDS: readonly string[] = [...new Set(Object.values(PRODUCT_PROFILES).map((p) => p.writerSubagentId))]
 
 /**
  * 将 ProductProfile 渲染为注入给 Subagent 的 <product_profile> XML 区段。

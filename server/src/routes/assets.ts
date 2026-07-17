@@ -30,7 +30,7 @@ assetsRouter.get('/', (req, res) => {
   res.json(listAssets(id))
 })
 
-// 清空全部（reset_all）: DELETE /api/projects/:id/assets
+// 清空全部资产: DELETE /api/projects/:id/assets
 assetsRouter.delete('/', async (req, res) => {
   const id = requireProject(req, res)
   if (!id) return

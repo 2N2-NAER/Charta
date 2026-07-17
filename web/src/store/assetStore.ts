@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AssetCardData, AssetStatus, AssetRelation } from '../types'
+import type { AssetCardData, AssetStatus } from '../types'
 import type { FileManager } from '../orchestrator/fileManager'
 import { SUBAGENT_REGISTRY, SKILLS_BY_SUBAGENT } from '../skills/skillLoader'
 import { usePhaseStore } from './phaseStore'
@@ -64,8 +64,6 @@ interface AssetState {
   previousContent?: string
   /** v6.4：中文字数缓存（仅 chapters/* 计算） */
   wordCount?: number
-  /** v7.1 M6 预留：资产关系（init/refresh 不填充，文件关系系统未实现） */
-  relations?: AssetRelation[]
 }
 
 /**

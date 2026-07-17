@@ -19,8 +19,6 @@ export interface ProjectMeta {
   phase?: 'designing' | 'writing'
   createdAt: string
   updatedAt: string
-  /** v7.1 M6 预留：资产间关系（projectStore 透传不解释，文件关系系统未实现） */
-  relations?: unknown[]
 }
 
 export interface AssetEntry {
@@ -193,7 +191,7 @@ export function deleteAsset(projectId: string, relPath: string): void {
   if (fs.existsSync(abs)) fs.rmSync(abs, { force: true })
 }
 
-/** 清空全部资产（保留项目本身），对应 FileManager.clearAll（reset_all 用） */
+/** 清空全部资产（保留项目本身），对应 FileManager.clearAll */
 export function clearAssets(projectId: string): Promise<void> {
   return enqueue(projectId, () => {
     const root = assetsDir(projectId)

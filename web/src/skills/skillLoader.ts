@@ -137,8 +137,6 @@ const referenceModules = import.meta.glob<{ default: string }>(
 
 /** 禁止 Skill frontmatter 声明属主（硬约束：Skill 不决定自己属于哪个 agent）。 */
 const FORBIDDEN_SKILL_KEYS = ['subagent', 'owner', 'agent']
-/** 已从产品能力中移除的 Subagent；同时屏蔽内置文件与服务端用户源残留。 */
-const DISABLED_SUBAGENT_IDS = new Set(['reset_all'])
 
 // ===== 构建注册表 =====
 
@@ -153,7 +151,6 @@ function buildRegistries(): {
   for (const [path, mod] of Object.entries(subagentModules)) {
     const segs = path.split('/')
     const dirId = segs[segs.length - 2]
-    if (DISABLED_SUBAGENT_IDS.has(dirId)) continue
     const { data, body } = parseFrontmatter(mod.default)
 
     const id = asString(data.id) || dirId
@@ -181,7 +178,6 @@ function buildRegistries(): {
     const segs = path.split('/')
     const skillId = segs[segs.length - 2]
     const subagentId = segs[segs.length - 3]
-    if (DISABLED_SUBAGENT_IDS.has(subagentId)) continue
 
     const { data, body } = parseFrontmatter(mod.default)
 
@@ -293,7 +289,6 @@ export async function loadUserSkills(): Promise<void> {
   // ① 解析用户源 Subagent
   const userSubagents = new Map<string, SubagentSpec>()
   for (const f of data.subagents) {
-    if (DISABLED_SUBAGENT_IDS.has(f.subagentId)) continue
     try {
       const { data: fm, body } = parseFrontmatter(f.raw)
       const id = asString(fm.id) || f.subagentId
@@ -317,7 +312,6 @@ export async function loadUserSkills(): Promise<void> {
   // ② 解析用户源 Skill
   const userSkillsBySubagent = new Map<string, SkillSpec[]>()
   for (const f of data.skills) {
-    if (DISABLED_SUBAGENT_IDS.has(f.subagentId)) continue
     try {
       const { data: fm, body } = parseFrontmatter(f.raw)
       let skip = false
@@ -401,7 +395,7 @@ export function getSkills(subagentId: string): SkillSpec[] {
   return SKILLS_BY_SUBAGENT.get(subagentId) ?? []
 }
 
-// v6.6：sequence_builder 用 target_sequence；四个产品 writer 用 target_chapter（白名单由 WRITER_IDS 派生）
+// v6.6：sequence_builder 用 target_sequence；统一写作 agent 用 target_chapter（白名单由 WRITER_IDS 派生）
 const NEEDS_TARGET_PARAM = new Set<string>(['sequence_builder', ...WRITER_IDS])
 
 function resolveTargetParamName(
@@ -415,7 +409,7 @@ function resolveTargetParamName(
  * 从 SubagentSpec 构建 OpenAI 兼容的 Function Calling 参数
  * 仅暴露 id + description，与 v5 行为一致保证 FC 面 stable。
  *
- * sequence_builder / 四个产品 writer 额外附非必填 target_sequence / target_chapter 参数，
+ * sequence_builder / 统一写作 agent 额外附非必填 target_sequence / target_chapter 参数，
  * 引擎 executeTool.resolveWriteTarget 据此构造 effectiveWrites 替换 frontmatter writes placeholder。
  * 格式合法性由 engine dispatch 时硬校验早退拒绝；此处仅在 description 给示例提示引导模型填合规值。
  */
@@ -431,7 +425,7 @@ export function buildFunctionSpec(subagent: SubagentSpec): ChatCompletionTool {
   if (paramName !== null) {
     const isChapter = paramName === 'target_chapter'
     if (isChapter) {
-      // v6.9：target_chapter 改可选——留空=全量并发批量，填=精修单序列（对齐 scene_beats 范式）
+      // v6.9：target_chapter 改可选——留空=全量并发批量，填=精修单序列。
       properties[paramName] = {
         type: 'string',
         description:

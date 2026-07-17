@@ -9,7 +9,6 @@ import type { LLMClient } from '../llm/client'
 import type { FileManager } from './fileManager'
 import { usePhaseStore } from '../store/phaseStore'
 import { useSelfCheckStore } from '../store/selfCheckStore'
-import { classifyLLMError } from '../utils/llmError'
 import orchestratorPromptRaw from '../llm/prompts/orchestrator_v5.md?raw'
 import { runAgentLoop, SUBAGENT_LOOP_MAX_ROUNDS } from './agentLoop'
 import { READ_FILE_TOOL, READ_REFERENCE_TOOL } from './readTools'
@@ -40,17 +39,6 @@ const CREATIVE_TOOL_IDS = [
 /** v7.3：宽泛 subagent ID 列表（走独立隔离上下文执行路径） */
 const ISOLATED_SUBAGENT_IDS = ['quality_checker', 'sequence_builder', 'prose_writer']
 
-/**
- * v6.6 短剧镜头分解规范（仅 short_drama writer 注入为 <shot_breakdown_spec>）。
- * 短剧 outputAnnotations 含 shot_breakdown，每集末尾输出 SHOT_BREAKDOWN 注释。
- */
-const SHORT_DRAMA_SHOT_SPEC = [
-  '短剧镜头分解规范（每集产出后于 END TAG 后输出 SHOT_BREAKDOWN 注释）：',
-  '- 注释格式：<!-- SHOT_BREAKDOWN: 景别·主体·情绪功能 | 景别·主体·情绪功能 | ... -->',
-  '- 景别词库：特写 / 近景 / 中景 / 全景 / 远景 / 俯拍 / 仰拍 / 跟拍 / 手持',
-  '- 每集 4-8 个镜头节点，按时间顺序排列，标注景别+主体+情绪功能',
-  '- 镜头节奏服务于脉冲式叙事：钩子集用快切（短镜头多），沉淀集可放慢',
-].join('\n')
 
 type WriterOutputKind =
   | 'novel_chapter'
@@ -73,16 +61,6 @@ function getDefaultSkill(subagentId: string): SkillSpec {
     throw new Error(`[skillResolver] Subagent "${subagentId}" 没有可用 Skill`)
   }
   return skills[0]
-}
-
-function isPrimaryWritingAssetPath(path: string): boolean {
-  return (
-    path.startsWith('novel_chapters/') ||
-    path.startsWith('short_drama_scripts/') ||
-    path.startsWith('long_drama_scripts/') ||
-    path.startsWith('film_scripts/') ||
-    path.startsWith('chapters/')
-  )
 }
 
 function isVideoScriptIntent(instruction: string): boolean {
@@ -143,21 +121,6 @@ function pad2(n: number): string {
   return String(n).padStart(2, '0')
 }
 
-/**
- * v6.6：将序列 ID 折算为线性序号，供伏笔寿命裁剪做距离比较。
- *
- * S{幕}-{序} → 幕×100 + 序（如 S1-1→101、S2-3→203）；非匹配格式返回 0。
- * 粗粒度仅用于"是否超寿命"的远近距离判断，不要求精确可序。
- */
-function seqOrdinal(seqId: string): number {
-  const m = /^S?([A-Z])\d*?-?(\d+)-(\d+)/.exec(seqId)
-  if (!m) return 0
-  const act = Math.max(1, m[1].charCodeAt(0) - 64) // A→1, B→2 ...
-  const seq = parseInt(m[2], 10)
-  const sub = parseInt(m[3], 10)
-  return act * 10000 + seq * 100 + sub
-}
-
 interface ExtraLabelEntry {
   /** XML tag 名（不含尖括号），如 prev_scenes / current_target */
   label: string
@@ -206,7 +169,7 @@ function countTableDataRows(md: string): number {
  *
  * 展开逻辑仅在 skill.reads 出现 `/*.md` 后缀时触发；非 checker 的其他 skill 全部走原路径。
  * 同前缀文件以 `<slice id="...">` 子 tag 并列，外层 tag 名由 prefix 推导：
- *   sequences/ → <scene_beats_slices>
+ *   sequences/ → <sequence_slices>
  */
 function expandGlobs(
 	reads: string[],
@@ -230,7 +193,7 @@ function expandGlobs(
 
 			// 拼聚合标签名
 			if (prefix === 'sequences') {
-				aggregatedLabel = 'scene_beats_slices'
+				aggregatedLabel = 'sequence_slices'
 			}
 			// 未来可扩展更多前缀 → 标签名映射
 		} else {
@@ -341,22 +304,8 @@ export class OrchestratorEngine {
   private fileManager: FileManager
   private onEvent?: ExecutionEventCallback
 
-  /** v6.4 角色行为追踪：key=target_chapter，值=该章中提取的 BEHAVIOR_TRACK 注释列表 */
-  private behaviorTrack: Map<string, string[]> = new Map()
 
-  /**
-   * v6.6 伏笔运行时状态：key=F-id，值={planted, paidoff, atChapter}。
-   * 从四 writer 输出的 `<!-- FORESHADOW: F-id=plant|payoff@章节id -->` 注释提取，
-   * 注入 `<foreshadowing_state>` 供下游 writer 防重复 plant / 提前 payoff。
-   * 按 foreshadowingMaxLifespan 裁剪过期项。
-   */
-  private foreshadowingState: Map<string, { planted: boolean; paidoff: boolean; atChapter: string }> = new Map()
 
-  /**
-   * v6.6 批次断点：key=sequenceId，值={lastUnit, done}。
-   * 短剧/长剧按分段续写时记录已完成单元数，支持跨对话轮断点续写。
-   */
-  private batchProgress: Map<string, { lastUnit: number; done: boolean }> = new Map()
 
   /**
    * v6.6 产品档案锁：项目级锁定不可变，由 UI 产品选择器经 lockProfile() 落定。
@@ -521,27 +470,6 @@ export class OrchestratorEngine {
       return this.runSubagentWithIsolatedContext(subagent, instruction, target ? normalizeToSequenceId(target) : undefined)
     }
 
-    // ===== WRITER 分流：空靶=全量并发批量 / 带靶=单序列精修 =====
-    if (WRITER_IDS.includes(subagent.id)) {
-      if (!target) {
-        return this.runWriterBatchPipeline(subagent, instruction, history)
-      }
-      if (!TARGET_ID_REGEX.test(target)) {
-        this.emit('tool_error', {
-          toolId: subagent.id,
-          toolName: subagent.name,
-          message: `${subagent.name} 的 target_chapter 格式非法（形如 S1-1）；留空=全量并发批量，填写=精修单序列`,
-        })
-        return {
-          success: false,
-          error: `target_chapter 格式非法：${target}`,
-          skillName: subagent.name,
-        }
-      }
-      const seqId = normalizeToSequenceId(target)
-      const episodeRange = await this.buildEpisodeRangeMap([seqId])
-      return this.runWriterSequencePipeline(subagent, seqId, instruction, history, episodeRange)
-    }
 
     // ===== 单 Skill 直发路径 =====
     // ① v7.3 后撤销旧技能分流层：非隔离 Subagent 均按注册顺序使用默认 Skill。
@@ -557,10 +485,10 @@ export class OrchestratorEngine {
       }
     }
 
-    // ③ 组装静态上下文 + v6.3 聚合标签拼接（若命中 glob 即追加 <scene_beats_slices>）
+    // ③ 组装静态上下文 + v6.3 聚合标签拼接（若命中 glob 即追加 <sequence_slices>）
     let context = assembleContext(expandedReads, files)
     if (aggregatedLabel) {
-      const prefix = aggregatedLabel === 'scene_beats_slices' ? 'sequences' : ''
+      const prefix = aggregatedLabel === 'sequence_slices' ? 'sequences' : ''
       if (prefix) {
         context += buildAggregatedXml(aggregatedLabel, expandedReads, files)
       }
@@ -645,141 +573,8 @@ export class OrchestratorEngine {
   }
 
   /**
-   * v6.4：从 writer 输出中提取角色行为追踪注释。
-   * v6.6：LRU 上限从硬编码 5 改为 profileLock.behaviorTrackWindow（小说 8/剧本 8/长剧 12/短剧 20）。
-   */
-  private extractBehaviorTrack(target: string, output: string): void {
-    const regex = /<!--\s*BEHAVIOR_TRACK:\s*(.+?)\s*-->/g
-    const tracks: string[] = []
-    let match: RegExpExecArray | null
-    while ((match = regex.exec(output)) !== null) {
-      tracks.push(match[1].trim())
-    }
-    if (tracks.length > 0) {
-      // 先删再插，保证 LRU 语义正确（Map.set 不改变已有 key 的插入位置）
-      this.behaviorTrack.delete(target)
-      this.behaviorTrack.set(target, tracks)
-      // 上限取产品档案窗口（不复用 foreshadowingMaxLifespan——语义不同）
-      const window = this.profileLock?.behaviorTrackWindow ?? 8
-      while (this.behaviorTrack.size > window) {
-        const oldest = this.behaviorTrack.keys().next().value
-        if (oldest) this.behaviorTrack.delete(oldest)
-      }
-    }
-  }
-
-  /**
-   * v6.6：从 writer 输出提取伏笔运行时状态。
-   *
-   * 解析 `<!-- FORESHADOW: F-id=plant@章节id -->` / `payoff@章节id`，更新 foreshadowingState：
-   *   - plant → 标记 planted=true，记录 atChapter
-   *   - payoff → 标记 paidoff=true
-   * 随后按 foreshadowingMaxLifespan 裁剪：与最新章节序距超过寿命的已 resolved 项剔除。
-   */
-  private extractForeshadowingState(target: string, output: string): void {
-    const regex = /<!--\s*FORESHADOW:\s*(F-[\w-]+)\s*=\s*(plant|payoff)\s*@\s*([\w-]+)\s*-->/g
-    let match: RegExpExecArray | null
-    const latestOrd = seqOrdinal(normalizeToSequenceId(target))
-    while ((match = regex.exec(output)) !== null) {
-      const [, fId, action, atChapter] = match
-      const entry = this.foreshadowingState.get(fId) ?? { planted: false, paidoff: false, atChapter }
-      if (action === 'plant') {
-        entry.planted = true
-        entry.atChapter = atChapter
-      } else {
-        entry.paidoff = true
-      }
-      this.foreshadowingState.set(fId, entry)
-    }
-    // 按 lifespan 裁剪：已回收且距最新章节超寿命的伏笔移除（不再有用）
-    const lifespan = this.profileLock?.foreshadowingMaxLifespan ?? 20
-    for (const [fId, entry] of this.foreshadowingState) {
-      if (entry.paidoff && Math.abs(seqOrdinal(normalizeToSequenceId(entry.atChapter)) - latestOrd) > lifespan) {
-        this.foreshadowingState.delete(fId)
-      }
-    }
-  }
-
-  /**
-   * v6.6：更新批次断点进度。
-   *
-   * 短剧/长剧（proseSplitUnit != 'none'）按分段续写：从累积后草稿中数 `## 第N集`
-   * 单元数记录 lastUnit；非分段产品落 done=true。
-   * v6.9 fix: 改基于累积后内容(accumulatedDraft)算 lastUnit，而非 writer 本次 output——
-   *   writer 现只输出本单元，output 仅 1 集，旧逻辑会恒记 lastUnit=1。
-   */
-  private updateBatchProgress(target: string, accumulatedDraft: string): void {
-    const seqId = normalizeToSequenceId(target)
-    const splitUnit = this.profileLock?.proseSplitUnit ?? 'none'
-    if (splitUnit === 'none') {
-      this.batchProgress.set(seqId, { lastUnit: 0, done: true })
-      return
-    }
-    // 短剧/长剧数累积后草稿的 `## 第N集` 单元数
-    const unitMatches = accumulatedDraft.match(/##\s*第\s*\d+\s*集/g)
-    const lastUnit = unitMatches ? unitMatches.length : 0
-    this.batchProgress.set(seqId, { lastUnit, done: false })
-  }
-
-  /**
-   * v6.6：将 foreshadowingState 渲染为 `<foreshadowing_state>` XML 注入 writer 上下文。
-   * 空状态返回空串（appendExtraLabels 自动过滤）。
-   */
-  private renderForeshadowingStateXml(): string {
-    if (this.foreshadowingState.size === 0) return ''
-    const lines = [...this.foreshadowingState.entries()].map(
-      ([fId, st]) =>
-        `  <foreshadow id="${fId}" planted="${st.planted}" paidoff="${st.paidoff}" at="${st.atChapter}"/>`,
-    )
-    return `<foreshadowing_state>\n${lines.join('\n')}\n</foreshadowing_state>`
-  }
-
-  /**
-   * v6.6：将 batchProgress 渲染为 `<batch_progress>` XML 注入 writer 上下文。
-   * 空状态返回空串。供分段续写时感知本序列已产单元数。
-   */
-  private renderBatchProgressXml(): string {
-    if (this.batchProgress.size === 0) return ''
-    const lines = [...this.batchProgress.entries()].map(
-      ([seqId, st]) =>
-        `  <sequence id="${seqId}" lastUnit="${st.lastUnit}" done="${st.done}"/>`,
-    )
-    return `<batch_progress>\n${lines.join('\n')}\n</batch_progress>`
-  }
-
-  /**
-   * v6.4：视听转化软校验，非阻塞——仅在 execution log 中产生 warning。
-   */
-  private runSoftValidation(output: string): string[] {
-    const warnings: string[] = []
-
-    // 1. 全知叙述句式检测
-    if (/他不知道[，,\s]*这是[他她].*?[最后终]/.test(output)) {
-      warnings.push('检测到疑似全知叙述句式（如"他不知道，这是他最后一次..."）')
-    }
-
-    // 2. 直白情感标签检测
-    const emotionMatches = output.match(/她?很(?:伤心|难过|生气|愤怒|害怕|紧张|开心|高兴|失望|焦虑|恐惧)/g)
-    if (emotionMatches && emotionMatches.length > 0) {
-      warnings.push(`检测到 ${emotionMatches.length} 处直白情感标签：${emotionMatches.slice(0, 3).join('、')}。建议用行为替代`)
-    }
-
-    // 3. 过长无对话描写检测
-    const paragraphs = output.split(/\n\n+/)
-    for (let i = 0; i < paragraphs.length; i++) {
-      const lines = paragraphs[i].split('\n').filter(l => l.trim())
-      if (lines.length > 5 && !/[「「"」"」：]/.test(paragraphs[i])) {
-        warnings.push(`检测到第 ${i + 1} 段超过 5 行的无对话描写段落`)
-        break
-      }
-    }
-
-    return warnings
-  }
-
-  /**
    * v6.8 有界并发池：最多 limit 个 worker 同时跑，超出排队。
-   * out[i] 与 items[i] 下标对齐（无论完成顺序），保证 runWriterBatchPipeline 汇总 seqIds[i] 正确。
+   * out[i] 与 items[i] 下标对齐（无论完成顺序），保证批量汇总稳定。
    */
   private async runWithConcurrency<T, R>(
     items: T[], limit: number, worker: (item: T) => Promise<R>,
@@ -796,32 +591,6 @@ export class OrchestratorEngine {
     return out
   }
 
-  /**
-   * v6.8 429 指数退避重试（复用 classifyLLMError 识别 rate_limit）。
-   * 非 429 直接抛交原流程；429 退避重试不消耗 MAX_RETRIES 格式重试预算。
-   */
-  private async sendWithRateLimit(
-    ctx: { toolId: string; toolName: string; skillId: string; skillName: string },
-    systemPrompt: string, userContent: string,
-  ): Promise<string> {
-    const MAX_429_RETRIES = 3
-    for (let i = 0; i < MAX_429_RETRIES; i++) {
-      try {
-        return await this.llm.sendMessage(systemPrompt, userContent)
-      } catch (e) {
-        if (classifyLLMError(e).type !== 'rate_limit' || i === MAX_429_RETRIES - 1) throw e
-        const backoff = 1000 * Math.pow(2, i) // 1s → 2s → 4s
-        this.emit('tool_retry', {
-          toolId: ctx.toolId, toolName: ctx.toolName, skillId: ctx.skillId, skillName: ctx.skillName,
-          attempt: i + 1, maxAttempts: MAX_429_RETRIES,
-          message: `429 限流，${backoff}ms 后重试 (${i + 1}/${MAX_429_RETRIES})`,
-        })
-        await new Promise((r) => setTimeout(r, backoff))
-      }
-    }
-    throw new Error('unreachable')
-  }
-
   /** v6.7 从 sequence_list.md 扫全部序列 ID（S{幕}-{序}），去重排序 */
   private parseSequenceIds(seqListMd: string): string[] {
     const set = new Set<string>()
@@ -829,12 +598,6 @@ export class OrchestratorEngine {
     let m: RegExpExecArray | null
     while ((m = re.exec(seqListMd)) !== null) set.add(m[0])
     return [...set].sort()
-  }
-
-  /** v6.9 成文建档骨架：用 writer 自身 outputTags 包裹（四 writer tag 各异，动态取），UI 立即出现卡片 */
-  private buildChapterSkeleton(skill: SkillSpec, seqId: string): string {
-    const [start, end] = skill.outputTags
-    return `${start}\n# ${seqId}\n\n*（正文生成中…）*\n${end}`
   }
 
   /**
@@ -944,278 +707,6 @@ export class OrchestratorEngine {
       '  <note>读取或写入写作资产时必须使用这里给出的真实路径；不要自行把序列号拼成旧 chapters 路径。</note>',
       '</writer_asset_paths>',
     ].filter(Boolean).join('\n')
-  }
-
-  /**
-   * v6.9 单步 writer LLM 调用（短剧逐集 / 长剧逐场景 / 单序列整产共用）。
-   *
-   * 从原 executeTool WRITER 分支抽出上下文组装 + LLM 调用 + 校验逻辑，去掉落盘
-   * （累积改由 runWriterSequencePipeline 的 finalDraft 做，避免逐单元覆写丢历史）。
-   * 组装 reads 静态上下文 + current_draft/同幕/前章/行为追踪/档案/伏笔状态/批次进度，
-   * 调 sendWithRateLimit（429 退避不耗格式重试预算）×≤MAX_RETRIES，validateOutput 通过返回 extracted[chapterPath]。
-   *
-   * 守 INV-1：仍调 validateOutput 校验 START/END tags；INV-2：经 appendExtraLabels 注入标签。
-   */
-  private async runWriterStep(
-    subagent: SubagentSpec,
-    skill: SkillSpec,
-    seqId: string,
-    chapterPath: string,
-    seqBeatsDoc: string,
-    currentDraft: string,
-    instruction: string,
-    history: ConversationTurn[] | undefined,
-  ): Promise<string | null> {
-    // ② 读上下文（按 Skill.reads，支持 /*.md glob 展开 v6.3）
-    const files: Record<string, string> = {}
-    const allPaths = await this.fileManager.listAssetFiles()
-    const productDir = this.resolveVideoProductDir()
-    const resolvedReads = skill.reads.map((path) =>
-      path.replace(/<ID>/g, seqId).replace(/<target>/g, seqId).replace(/<product>/g, productDir),
-    )
-    const { reads: expandedReads, aggregatedLabel } = expandGlobs(resolvedReads, allPaths)
-    for (const path of expandedReads) {
-      if (!(path in files)) {
-        files[path] = await safeRead(this.fileManager, path)
-      }
-    }
-
-    // ③ 组装静态上下文 + v6.3 聚合标签拼接
-    let context = assembleContext(expandedReads, files)
-    if (aggregatedLabel) {
-      const prefix = aggregatedLabel === 'scene_beats_slices' ? 'sequences' : ''
-      if (prefix) {
-        context += buildAggregatedXml(aggregatedLabel, expandedReads, files)
-      }
-    }
-
-    // v6.4：同幕全部序列（按幕号聚合，替代旧 ±1 相邻序列）
-    const actPrefix = seqId.replace(/-\d+$/, '')
-    const seqPaths = allPaths
-      .filter(a => a.path.startsWith('sequences/') && a.path.endsWith('.md') && a.exists)
-      .map(a => a.path)
-      .sort()
-    const sameActPaths = seqPaths.filter(p => {
-      const sId = p.replace(/^sequences\//, '').replace(/\.md$/, '')
-      return sId.startsWith(actPrefix + '-')
-    })
-    const sameActDocs = await Promise.all(sameActPaths.map(p => safeRead(this.fileManager, p)))
-    const sameActXml = sameActPaths
-      .map((p, i) => {
-        const sId = p.replace(/^sequences\//, '').replace(/\.md$/, '')
-        return `<slice id="${sId}">\n${sameActDocs[i]}\n</slice>`
-      })
-      .join('\n')
-
-    // v6.4：紧前章节正文，供 Writer 感知实际文风（仅 CREATE 模式注入）
-    const chapterPaths = allPaths
-      .filter(a => isPrimaryWritingAssetPath(a.path) && a.path.endsWith('.md') && a.exists)
-      .map(a => a.path)
-      .sort()
-    const chapterIdx = chapterPaths.findIndex(p => p === chapterPath)
-    const prevChapterDoc = (!currentDraft && chapterIdx > 0)
-      ? await safeRead(this.fileManager, chapterPaths[chapterIdx - 1])
-      : ''
-
-    // v6.4：角色行为追踪摘要
-    const behaviorTrackingSummary = [...this.behaviorTrack.entries()]
-      .map(([ch, items]) => `<chapter id="${ch}">\n${items.map(i => `  - ${i}`).join('\n')}\n</chapter>`)
-      .join('\n\n')
-
-    // v6.6：注入产品档案 + 短剧镜头分解规范
-    const profileXml = this.profileLock ? renderProductProfileXml(this.profileLock) : ''
-    const shotSpec = this.profileLock?.kind === 'short_drama' ? SHORT_DRAMA_SHOT_SPEC : ''
-
-    // v6.6：伏笔运行时状态 + 批次断点（防重复 plant / 提前 payoff，支持分段续写）
-    const foreshadowStateXml = this.renderForeshadowingStateXml()
-    const batchProgressXml = this.renderBatchProgressXml()
-
-    context = appendExtraLabels(context, [
-      { label: 'current_draft', content: currentDraft },
-      { label: 'current_target', content: currentDraft },
-      { label: 'current_sequence_beats', content: seqBeatsDoc },
-      { label: 'same_act_sequences', content: sameActXml },
-      { label: 'previous_chapter_draft', content: prevChapterDoc },
-      { label: 'character_behavior_tracking', content: behaviorTrackingSummary },
-      { label: 'product_profile', content: profileXml },
-      { label: 'shot_breakdown_spec', content: shotSpec },
-      { label: 'foreshadowing_state', content: foreshadowStateXml },
-      { label: 'batch_progress', content: batchProgressXml },
-    ])
-
-    // ④ System Prompt + specView（effectiveWrites 替换 placeholder）
-    const systemPrompt = skill.preamble ? `${skill.preamble}\n\n${skill.body}` : skill.body
-    const specView: SkillSpec = { ...skill, writes: [chapterPath] }
-    let userContent = buildAgentPrompt(context, instruction, history)
-    const ctx = { toolId: subagent.id, toolName: subagent.name, skillId: skill.skillId, skillName: skill.name }
-
-    // ⑦ 调用 LLM + 校验（最多 MAX_RETRIES 次，429 由 sendWithRateLimit 退避不耗预算）
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      try {
-        const output = await this.sendWithRateLimit(ctx, systemPrompt, userContent)
-        const validation = validateOutput(output, specView)
-        if (validation.valid) {
-          return validation.extracted[chapterPath] ?? ''
-        }
-        if (attempt < MAX_RETRIES - 1) {
-          this.emit('tool_retry', {
-            toolId: ctx.toolId, toolName: ctx.toolName, skillId: ctx.skillId, skillName: ctx.skillName,
-            attempt: attempt + 1, maxAttempts: MAX_RETRIES,
-            message: `${subagent.name}[${seqId}] 格式错误，重试 ${attempt + 1}/${MAX_RETRIES}`,
-          })
-          const feedback = validation.structuralError
-            ? `⚠️ 结构错误：${validation.structuralError}`
-            : `⚠️ 格式错误：输出必须包含正确的 ${specView.outputTags[0]} 和 ${specView.outputTags[1]} 包裹。请严格遵循模板格式重新输出完整内容。`
-          userContent = `${userContent}\n\n---\n${feedback}`
-        }
-      } catch (e) {
-        if (attempt === MAX_RETRIES - 1) {
-          this.emit('tool_error', {
-            toolId: ctx.toolId, toolName: ctx.toolName,
-            message: `${subagent.name}[${seqId}] 单步调用失败：${(e as Error).message}`,
-          })
-          return null
-        }
-      }
-    }
-    return null
-  }
-
-  /**
-   * v6.9 单序列写作 pipeline（精修入口 / 批量并发循环体）。
-   *
-   * ① 建档（0 LLM）：按 resolveChapterPath 落骨架占位，UI 立即出卡片
-   * ② 分段产出（三分支，泛化 02 文档二分支——长剧 scene 亦需分段否则超 LLM 输出上限）：
-   *    - episode(短剧)：逐集循环调 runWriterStep，finalDraft 引擎累积（不依赖 writer 回填历史）
-   *    - scene(长剧)：逐场景循环，unitCount = sequences 场景表数据行数
-   *    - none(小说/剧本)：单次调 runWriterStep 产整序列
-   * ③ 收口：覆写落盘 + extractBehaviorTrack/extractForeshadowingState/updateBatchProgress + 软校验
-   *
-   * 守 INV-5：自包含，只读 profileLock/fileManager，只写本序列 chapter 文件，不读不写他序列产物（并行硬前提）。
-   */
-  private async runWriterSequencePipeline(
-    subagent: SubagentSpec,
-    seqId: string,
-    instruction: string,
-    history: ConversationTurn[] | undefined,
-    episodeRange: Map<string, [number, number]>,
-  ): Promise<ToolResult> {
-    const skill = this.resolvePrimaryScriptSkill() ?? getDefaultSkill(subagent.id)
-    const chapterPath = this.resolveWriterOutputPath(seqId, skill, episodeRange)
-    const splitUnit = this.profileLock?.proseSplitUnit ?? 'none'
-    const seqBeatsDoc = await safeRead(this.fileManager, `sequences/${seqId}.md`)
-
-    // ① 建档骨架（0 LLM）—— UI 立即出卡片
-    await this.fileManager.writeFile(chapterPath, this.buildChapterSkeleton(skill, seqId))
-    this.emit('tool_complete', {
-      toolId: subagent.id, toolName: subagent.name,
-      skillId: skill.skillId, skillName: skill.name,
-      writes: [chapterPath],
-      message: `[${seqId}] 建档骨架已落盘，开始正文生成`,
-    })
-
-    // ② 分段产出
-    let finalDraft = ''
-    if (splitUnit === 'episode') {
-      // 短剧逐集循环：集数 = episodeRange 区间长度（一集一场景）
-      const [start, end] = episodeRange.get(seqId) ?? [1, 8]
-      const episodeCount = end - start + 1
-      for (let i = 0; i < episodeCount; i++) {
-        const epDraft = await this.runWriterStep(
-          subagent, skill, seqId, chapterPath, seqBeatsDoc, finalDraft, instruction, history,
-        )
-        const placeholder = `<!-- 待补第${start + i}集（生成失败） -->`
-        finalDraft = epDraft == null
-          ? (finalDraft ? `${finalDraft}\n\n${placeholder}` : placeholder)
-          : (finalDraft ? `${finalDraft}\n\n${epDraft}` : epDraft)
-      }
-    } else if (splitUnit === 'scene') {
-      // 长剧逐场景循环：场景数 = sequences 场景表数据行数（解析失败回退 1）
-      const sceneCount = countTableDataRows(seqBeatsDoc) || 1
-      for (let i = 0; i < sceneCount; i++) {
-        const sceneDraft = await this.runWriterStep(
-          subagent, skill, seqId, chapterPath, seqBeatsDoc, finalDraft, instruction, history,
-        )
-        const placeholder = `<!-- 待补场景${i + 1}（生成失败） -->`
-        finalDraft = sceneDraft == null
-          ? (finalDraft ? `${finalDraft}\n\n${placeholder}` : placeholder)
-          : (finalDraft ? `${finalDraft}\n\n${sceneDraft}` : sceneDraft)
-      }
-    } else {
-      // 小说/剧本：单次产整序列
-      const draft = await this.runWriterStep(
-        subagent, skill, seqId, chapterPath, seqBeatsDoc, '', instruction, history,
-      )
-      finalDraft = draft ?? `<!-- 待补正文 ${seqId}（生成失败） -->`
-    }
-
-    // ③ 收口落盘 + 运行时记忆
-    await this.fileManager.writeFile(chapterPath, finalDraft)
-    this.extractBehaviorTrack(seqId, finalDraft)
-    this.extractForeshadowingState(seqId, finalDraft)
-    this.updateBatchProgress(seqId, finalDraft)
-    const softWarnings = this.runSoftValidation(finalDraft)
-
-    return {
-      success: true,
-      writes: [chapterPath],
-      output: '',
-      skillId: skill.skillId,
-      skillName: skill.name,
-      warnings: softWarnings.length > 0 ? softWarnings : undefined,
-    }
-  }
-
-  /**
-   * v6.9 全序列并发批量写作：读 sequence_list 解析全部 seqIds + buildEpisodeRangeMap
-   * → runWithConcurrency(WRITER_CONCURRENCY) 并发跑 runWriterSequencePipeline → 汇总单 ToolResult。
-   *
-   * 守 INV-5：每个 runWriterSequencePipeline 自包含，无跨序列共享可变状态，可安全并行。
-   * 竞态说明：extractBehaviorTrack/extractForeshadowingState/updateBatchProgress 写实例 Map，
-   *   JS 单线程事件循环下 await 期间虽交错，但 key 按 seqId/F-id 隔离无覆写；foreshadowingState
-   *   裁剪偶发不一致属软辅助不阻塞功能。
-   */
-  private async runWriterBatchPipeline(
-    subagent: SubagentSpec,
-    instruction: string,
-    history: ConversationTurn[] | undefined,
-  ): Promise<ToolResult> {
-    const seqListMd = await safeRead(this.fileManager, 'sequence_list.md')
-    const seqIds = this.parseSequenceIds(seqListMd)
-    if (seqIds.length === 0) {
-      return { success: false, error: '未能从 sequence_list.md 解析出任何序列 ID', skillName: subagent.name }
-    }
-    const episodeRange = await this.buildEpisodeRangeMap(seqIds)
-
-    this.emit('tool_start', {
-      toolId: subagent.id, toolName: subagent.name,
-      message: `并发批量写作 ${seqIds.length} 个序列（并发 ${BATCH_CONCURRENCY}）`,
-    })
-
-    const results = await this.runWithConcurrency(seqIds, BATCH_CONCURRENCY,
-      (seqId) => this.runWriterSequencePipeline(subagent, seqId, instruction, history, episodeRange))
-
-    // 汇总（下标对齐，不依赖完成顺序）
-    const writes: string[] = []
-    const warnings: string[] = []
-    let okCount = 0
-    results.forEach((r, i) => {
-      if (r.success) {
-        okCount++
-        if (r.writes) writes.push(...r.writes)
-        if (r.warnings) warnings.push(...r.warnings)
-      } else {
-        warnings.push(`序列 ${seqIds[i]} 失败：${r.error}`)
-      }
-    })
-    return {
-      success: okCount > 0,
-      writes,
-      output: '',
-      skillName: subagent.name,
-      error: okCount === 0 ? '全部序列写作失败' : undefined,
-      warnings: warnings.length > 0 ? warnings : undefined,
-    }
   }
 
   // ===== v7.3 宽泛 subagent 独立上下文执行 =====

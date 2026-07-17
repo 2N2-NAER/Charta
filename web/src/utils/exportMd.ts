@@ -37,17 +37,6 @@ export function downloadText(filename: string, content: string, mime = 'text/mar
 }
 
 /**
- * 全量导出：把多个资产合并为单一 Markdown。
- * 每段以 `# <标题>` 作分节标题，段间用分隔线，供 MD 直下或转 Word。
- */
-export function buildAllMarkdown(items: { title: string; content: string }[]): string {
-  return items
-    .filter((it) => it.content.trim())
-    .map((it) => `# ${it.title}\n\n${it.content.trim()}`)
-    .join('\n\n---\n\n')
-}
-
-/**
  * v7.9.1：全量导出改为结构化资产包。
  * Markdown 每个资产独立成文件；Word 每个资产独立转 docx 后放入同构目录。
  */

@@ -17,7 +17,7 @@ import type { SkillSpec, ValidationResult } from '../types'
 export function validateOutput(output: string, skill: SkillSpec): ValidationResult {
   const [startTag, endTag] = skill.outputTags
 
-  // 无 TAG 的 Skill（如 reset_all）跳过校验
+  // 无 TAG 的 Skill 跳过校验
   if (!startTag || !endTag) {
     return { valid: true, missingTags: [], extracted: {} }
   }

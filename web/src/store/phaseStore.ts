@@ -9,7 +9,7 @@ import type { FileManager } from '../orchestrator/fileManager'
  *               全体拍照存入 baselines 作 UI 对照基线；置 phase='writing'。
  *   - unlock()：回退 phase 并清空快照，**保留写作期正文/剧本成果**
  *               （解锁是为了回去微调设定再续写不该丢稿子）。
- *   - reset()：彻底归位至初始 designing 空 baselines（供 reset_all 触发联动）。
+ *   - reset()：彻底归位至初始 designing 空 baselines。
  *   - isLockedPath(p)/getBaseline(p)：分别服务引擎 Guard 判定与 BaselinePanel 渲染。
  *
  * 选独立 store 而非扩 InMemoryFileManager 接口的理由：snapshot 仅服务于前端对照视图与门控判定，

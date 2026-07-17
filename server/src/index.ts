@@ -7,7 +7,6 @@ import { llmRouter } from './routes/llm.js'
 import { projectsRouter } from './routes/projects.js'
 import { assetsRouter } from './routes/assets.js'
 import { chatRouter } from './routes/chat.js'
-import { relationsRouter } from './routes/relations.js'
 import { skillsRouter } from './routes/skills.js'
 import { importExportRouter } from './routes/importExport.js'
 
@@ -24,10 +23,9 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/config', configRouter)
 app.use('/api/llm', llmRouter)
 app.use('/api/skills', skillsRouter)
-// assets/chat/relations 先挂（更具体路径），避免 projects 的 /:id 抢匹配子路径
+// assets/chat 先挂（更具体路径），避免 projects 的 /:id 抢匹配子路径
 app.use('/api/projects/:id/assets', assetsRouter)
 app.use('/api/projects/:id/chat', chatRouter)
-app.use('/api/projects/:id/relations', relationsRouter)
 app.use('/api/projects', projectsRouter)
 app.use('/api', importExportRouter)
 

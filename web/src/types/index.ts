@@ -101,23 +101,6 @@ export interface SkillSpec {
 /** 卡片状态（简化 3 态，v4 取消了 approved/locked） */
 export type AssetStatus = 'pending' | 'generated' | 'modified'
 
-// ===== 资产间逻辑关系（v7.1 M6 预留，文件关系系统未实现功能） =====
-
-/** 资产关系类型（预留枚举，文件关系系统后续启用） */
-export type AssetRelationType = 'depends_on' | 'references' | 'derived_from'
-
-/** 资产间逻辑关系（预留：当前无任何代码填充或消费此字段） */
-export interface AssetRelation {
-  /** 源资产路径 */
-  from: string
-  /** 目标资产路径 */
-  to: string
-  /** 关系类型 */
-  type: AssetRelationType
-  /** 可选备注 */
-  note?: string
-}
-
 // ===== 资产文件信息 =====
 
 /** 资产文件元信息（v4 去掉了 stage/agentId） */
@@ -126,8 +109,6 @@ export interface AssetFileInfo {
   filename: string
   group: string
   exists: boolean
-  /** v7.1 M6 预留：资产关系（init/refresh 不填充，文件关系系统未实现） */
-  relations?: AssetRelation[]
 }
 
 /** 前端卡片展示数据（v4 去掉了 stage/isLocked） */
