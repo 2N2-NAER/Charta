@@ -58,6 +58,14 @@ outputTags: ['<<<SEQUENCE_LAYER_START>>>', '<<<SEQUENCE_LAYER_END>>>']
 - **CREATE**：`sequences/<ID>.md` 不存在或为空 → 按 schema 完整产出
 - **REFINE**：`sequences/<ID>.md` 已存在 → 严守原 ID 不动，仅按 instruction 要求局部修补，其余内容原样保留
 
+## 下游反馈处理
+
+只有当前 Skill 被 Orchestrator 明确选中时，才允许修订 `sequences/<ID>.md`。如果 instruction 提到场景层或节拍层反馈，应把它视为“修订线索”，而不是下游事实自动覆盖上游。
+
+- 优先保持 `act_map.md`、`sequence_list.md`、`characters.md` 所定义的上游设计方向
+- 只有当下游反馈确实揭示序列层内部矛盾、缺口或不可执行问题时，才做最小修订
+- 不要为了迎合某个场景写法而改变序列的核心戏剧问题、所属幕或全局功能
+
 ## 核心约束
 - 所有角色名必须引用自 `characters.md` 的注册表
 - "所属幕"的值必须是 `act_map.md` 中存在的幕 ID
