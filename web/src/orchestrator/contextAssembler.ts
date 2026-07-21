@@ -1,4 +1,15 @@
 /**
+ * 将单个文件路径和内容包装为 XML 标签
+ */
+export function wrapFileAsXml(filePath: string, content?: string): string {
+  const tagName = filePath.replace(/\.md$/, '').replace(/[/\\:]/g, '_')
+  if (content && content.length > 0) {
+    return `<${tagName}>\n${content}\n</${tagName}>`
+  }
+  return `<${tagName}></${tagName}>`
+}
+
+/**
  * v5.3 版上下文组装器
  *
  * 从 Skill.reads 读取文件列表，自动组装为 XML 标签格式的上下文。

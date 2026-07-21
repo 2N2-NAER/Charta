@@ -312,13 +312,24 @@ function estimateTokens(messages: ChatCompletionMessageParam[]): number {
 function compressMessages(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
   if (messages.length <= 4) return messages
 
-  // 保留最新 2 轮（最后 4 条消息：2 个 assistant + 2 个 tool）
-  const keep = messages.slice(-4)
+  // 从尾部往前搜索最后一个完整的 FC 轮次（assistant{tool_calls} + 其后的所有 tool）
+  // 防止切掉 assistant{tool_calls} 导致下游 tool 无对应前驱（DeepSeek 硬校验）。
+  let keepStart = messages.length
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role === 'assistant' && (msg as any).tool_calls) {
+      keepStart = i
+      break
+    }
+  }
+  // 兜底：没找到 tool_calls 轮次则保留最后 4 条
+  if (keepStart === messages.length) {
+    keepStart = Math.max(0, messages.length - 4)
+  }
 
-  // 在消息列表开头添加压缩标记
   return [
-    { role: 'system', content: '[此前工具调用已完成，以下为最新 2 轮调用记录]' },
-    ...keep,
+    { role: 'system', content: '[此前工具调用已完成，以下为最新工具调用记录]' },
+    ...messages.slice(keepStart),
   ]
 }
 
@@ -1602,10 +1613,10 @@ export class OrchestratorEngine {
           // 限制单次调用的工具数量
           const callsToProcess = toolCalls.slice(0, MAX_TOOLS_PER_ROUND)
 
-          // 先将 assistant 消息加入历史（含 tool_calls）
+          // 先将 assistant 消息加入历史（保留原始字段，含 DeepSeek reasoning_content）
           messages.push({
-            role: 'assistant' as const,
-            content: message.content,
+            ...message,
+            role: 'assistant',
             tool_calls: callsToProcess,
           } as ChatCompletionMessageParam)
 
