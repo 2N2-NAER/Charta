@@ -20,5 +20,6 @@ _design_docs/*
 # 内部资料，不上传
 AGENTS.md
 test_api.mjs
+project_summary_9.0/
 .claude/
 .vscode/
