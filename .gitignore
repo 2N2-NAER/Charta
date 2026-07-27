@@ -19,5 +19,7 @@ project_summary_*/
 # 内部资料，不上传
 AGENTS.md
 test_api.mjs
+project_summary_9.0/
+project_summary_9.5/
 .claude/
 .vscode/
