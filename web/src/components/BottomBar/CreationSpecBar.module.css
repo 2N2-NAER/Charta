@@ -1,0 +1,159 @@
+.specBar {
+  position: relative;
+  flex-shrink: 0;
+  padding: 0 14px 9px;
+}
+
+.trigger {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid #d3c7b5;
+  border-radius: 8px;
+  background: #e9e1d4;
+  color: #2b1d22;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.triggerLabel {
+  font-size: 10px;
+  color: #6d746f;
+  letter-spacing: 0.12em;
+}
+
+.triggerValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.chevron {
+  font-size: 10px;
+  color: #8b3548;
+}
+
+.sheet {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(139, 53, 72, 0.22);
+  border-radius: 8px;
+  background: #fbf8f0;
+  box-shadow: 0 12px 30px rgba(43, 29, 34, 0.16);
+}
+
+.productGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.productBtn {
+  min-width: 0;
+  padding: 6px 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: rgba(233, 225, 212, 0.72);
+  color: #74666b;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.productBtn.active {
+  background: #fff;
+  border-color: rgba(139, 53, 72, 0.28);
+  color: #782e3f;
+  font-weight: 600;
+}
+
+.productBtn:disabled {
+  cursor: default;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sliderRow {
+  display: grid;
+  grid-template-columns: 34px 1fr 62px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #74666b;
+}
+
+.sliderLabel {
+  font-weight: 600;
+}
+
+.slider {
+  width: 100%;
+  accent-color: #8b3548;
+}
+
+.sliderValue {
+  color: #2b1d22;
+  text-align: right;
+  font-weight: 600;
+}
+
+.preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+  font-size: 11px;
+  color: #74666b;
+}
+
+.preview strong {
+  color: #2b1d22;
+  font-weight: 600;
+}
+
+.applyBtn {
+  align-self: flex-end;
+  padding: 6px 12px;
+  border: 1px solid rgba(139, 53, 72, 0.28);
+  border-radius: 6px;
+  background: #8b3548;
+  color: #fff;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.applyBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.locked .trigger {
+  background: rgba(139, 53, 72, 0.06);
+  border-color: rgba(139, 53, 72, 0.22);
+}
+
+.locked .triggerLabel,
+.locked .chevron {
+  color: #7e3042;
+}
