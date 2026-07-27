@@ -15,11 +15,19 @@ export interface ProjectMeta {
   description?: string
   /** v7.4：项目级产品方向，跨服务重启恢复 Orchestrator profileLock */
   productKind?: 'novel' | 'screenplay' | 'long_drama' | 'short_drama'
+  /** v9.5：用户侧创作规格，只承载产品类型与篇幅规模。 */
+  creationSpec?: CreationSpec
   /** v7.4：项目当前阶段，跨服务重启恢复 Phase Gate */
   phase?: 'designing' | 'writing'
   createdAt: string
   updatedAt: string
 }
+
+export type CreationSpec =
+  | { productKind: 'screenplay'; lengthMinutes: number }
+  | { productKind: 'novel'; wordCountWan: number }
+  | { productKind: 'long_drama'; episodeCount: number; minutesPerEpisode: number }
+  | { productKind: 'short_drama'; episodeCount: number; minutesPerEpisode: number }
 
 export interface AssetEntry {
   path: string
@@ -115,6 +123,7 @@ export function updateProject(
     name?: string
     description?: string
     productKind?: ProjectMeta['productKind'] | null
+    creationSpec?: ProjectMeta['creationSpec'] | null
     phase?: ProjectMeta['phase']
   },
 ): ProjectMeta {
@@ -125,6 +134,10 @@ export function updateProject(
   if (patch.productKind !== undefined) {
     if (patch.productKind === null) delete meta.productKind
     else meta.productKind = patch.productKind
+  }
+  if (patch.creationSpec !== undefined) {
+    if (patch.creationSpec === null) delete meta.creationSpec
+    else meta.creationSpec = patch.creationSpec
   }
   if (patch.phase !== undefined) meta.phase = patch.phase
   meta.updatedAt = nowIso()
