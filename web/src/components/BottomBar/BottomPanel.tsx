@@ -4,7 +4,7 @@ import styles from './BottomPanel.module.css'
 import { ChatInput } from './ChatInput'
 import { FileImporter } from './FileImporter'
 import { ChatHistory } from './ChatHistory'
-import { ModeBar } from './ModeBar'
+import { CreationSpecBar } from './CreationSpecBar'
 import { SelfCheckToggle } from './RuntimeControls'
 
 import { useChatStore } from '../../store/chatStore'
@@ -71,8 +71,8 @@ export function BottomPanel() {
         <ChatHistory messages={messages} />
       </div>
 
-      {/* v7.1 改动2：创作模式选择器（下放到对话底部） */}
-      <ModeBar />
+      {/* v9.5：创作规格入口（产品类型 + 篇幅规模） */}
+      <CreationSpecBar />
 
       {/* 文件导入 */}
       <FileImporter
