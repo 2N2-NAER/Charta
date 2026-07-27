@@ -6,6 +6,7 @@ import {
   updateProject,
   deleteProject,
   ProjectNotFound,
+  type CreationSpec,
 } from '../services/projectStore.js'
 
 export const projectsRouter = Router()
@@ -38,6 +39,7 @@ projectsRouter.patch('/:id', (req, res) => {
       name?: string
       description?: string
       productKind?: 'novel' | 'screenplay' | 'long_drama' | 'short_drama' | null
+      creationSpec?: CreationSpec | null
       phase?: 'designing' | 'writing'
     }
     const productKinds = new Set(['novel', 'screenplay', 'long_drama', 'short_drama'])
@@ -48,6 +50,16 @@ projectsRouter.patch('/:id', (req, res) => {
     ) {
       res.status(400).json({ error: { kind: 'bad_request', message: '无效的 productKind' } })
       return
+    }
+    if (patch.creationSpec !== undefined && patch.creationSpec !== null) {
+      if (!isValidCreationSpec(patch.creationSpec)) {
+        res.status(400).json({ error: { kind: 'bad_request', message: '无效的 creationSpec' } })
+        return
+      }
+      if (patch.productKind !== undefined && patch.productKind !== null && patch.creationSpec.productKind !== patch.productKind) {
+        res.status(400).json({ error: { kind: 'bad_request', message: 'creationSpec 与 productKind 不一致' } })
+        return
+      }
     }
     if (patch.phase !== undefined && patch.phase !== 'designing' && patch.phase !== 'writing') {
       res.status(400).json({ error: { kind: 'bad_request', message: '无效的 phase' } })
@@ -70,3 +82,17 @@ projectsRouter.delete('/:id', (req, res) => {
   deleteProject(req.params.id)
   res.json({ ok: true })
 })
+
+function isValidCreationSpec(spec: CreationSpec): boolean {
+  if (!spec || typeof spec !== 'object') return false
+  if (spec.productKind === 'screenplay') return isFinitePositive(spec.lengthMinutes)
+  if (spec.productKind === 'novel') return isFinitePositive(spec.wordCountWan)
+  if (spec.productKind === 'long_drama' || spec.productKind === 'short_drama') {
+    return isFinitePositive(spec.episodeCount) && isFinitePositive(spec.minutesPerEpisode)
+  }
+  return false
+}
+
+function isFinitePositive(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
