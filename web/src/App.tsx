@@ -25,6 +25,7 @@ import {
   type ProjectMeta,
 } from './api/projects'
 import type { ProductKind } from './types/product'
+import { getDefaultCreationSpec, isCreationSpec, type CreationSpec } from './types/creationSpec'
 import { LLMClient } from './llm/client'
 import { OrchestratorEngine } from './orchestrator/orchestratorEngine'
 import { loadUserSkills } from './skills/skillLoader'
@@ -38,7 +39,7 @@ import { SettingsPage } from './pages/Settings/SettingsPage'
  */
 async function inferLegacyRuntimeState(
   fm: FileManager,
-): Promise<{ productKind: ProductKind | null; phase: 'designing' | 'writing' }> {
+): Promise<{ productKind: ProductKind | null; creationSpec: CreationSpec | null; phase: 'designing' | 'writing' }> {
   const files = await fm.listAssetFiles()
   const paths = files.filter((f) => f.exists).map((f) => f.path)
   const hasShortDramaChapters = paths.some((p) =>
@@ -92,7 +93,11 @@ async function inferLegacyRuntimeState(
     else if (new RegExp(`${explicitType}小说`).test(corpus)) productKind = 'novel'
   }
 
-  return { productKind, phase: hasWritingAssets ? 'writing' : 'designing' }
+  return {
+    productKind,
+    creationSpec: productKind ? getDefaultCreationSpec(productKind) : null,
+    phase: hasWritingAssets ? 'writing' : 'designing',
+  }
 }
 
 function App() {
@@ -125,9 +130,15 @@ function App() {
 
       const legacy = await inferLegacyRuntimeState(fm)
       const productKind = persistedProject.productKind ?? legacy.productKind
+      const creationSpec = isCreationSpec(persistedProject.creationSpec)
+        ? persistedProject.creationSpec
+        : productKind
+          ? getDefaultCreationSpec(productKind)
+          : legacy.creationSpec
       let restoredPhase = persistedProject.phase ?? legacy.phase
 
-      if (productKind) engine.lockProfile(productKind)
+      if (creationSpec) engine.lockCreationSpec(creationSpec)
+      else if (productKind) engine.lockProfile(productKind)
 
       // 先清掉上一个项目的 UI/Phase 内存，再从当前项目 metadata + 资产重建。
       useUIStore.getState().reset()
@@ -144,6 +155,7 @@ function App() {
 
       const hydratedProject = await updateProject(persistedProject.id, {
         productKind,
+        creationSpec,
         phase: restoredPhase,
       })
       await initChatStore(engine, persistedProject.id)
