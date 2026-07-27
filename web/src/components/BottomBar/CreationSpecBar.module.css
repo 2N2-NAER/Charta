@@ -1,51 +1,109 @@
 .specBar {
   position: relative;
+  width: 174px;
   flex-shrink: 0;
-  padding: 0 14px 9px;
 }
 
 .trigger {
   width: 100%;
-  min-height: 34px;
+  min-height: 30px;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: minmax(0, 1fr) 18px;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid #d3c7b5;
-  border-radius: 8px;
-  background: #e9e1d4;
+  gap: 6px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid rgba(139, 53, 72, 0.22);
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, rgba(251, 248, 240, 0.96), rgba(233, 225, 212, 0.82));
   color: #2b1d22;
   font-family: inherit;
   cursor: pointer;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55) inset;
+}
+
+.trigger:hover {
+  border-color: rgba(139, 53, 72, 0.36);
+  background:
+    linear-gradient(180deg, #fffaf2, rgba(233, 225, 212, 0.9));
+}
+
+.ticket {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "label value"
+    "meta meta";
+  align-items: baseline;
+  column-gap: 5px;
+  text-align: left;
 }
 
 .triggerLabel {
+  grid-area: label;
   font-size: 10px;
-  color: #6d746f;
+  color: #8b3548;
   letter-spacing: 0.12em;
 }
 
 .triggerValue {
+  grid-area: value;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  text-align: left;
+}
+
+.triggerMeta {
+  grid-area: meta;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.1;
+  color: #8a7a72;
 }
 
 .chevron {
-  font-size: 10px;
-  color: #8b3548;
+  position: relative;
+  width: 18px;
+  height: 22px;
+  border-radius: 5px;
+  background: rgba(139, 53, 72, 0.08);
+}
+
+.chevron::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid #8b3548;
+  border-bottom: 1.5px solid #8b3548;
+  transition:
+    transform 160ms ease-out,
+    top 160ms ease-out;
+}
+
+.chevron::before {
+  transform: rotate(45deg);
+}
+
+.chevron[data-open='true']::before {
+  top: 10px;
+  transform: rotate(-135deg);
 }
 
 .sheet {
   position: absolute;
-  left: 14px;
-  right: 14px;
-  bottom: calc(100% + 6px);
+  left: 0;
+  width: min(360px, calc(100vw - 28px));
+  bottom: calc(100% + 8px);
   z-index: 20;
   display: flex;
   flex-direction: column;
@@ -153,7 +211,20 @@
   border-color: rgba(139, 53, 72, 0.22);
 }
 
-.locked .triggerLabel,
-.locked .chevron {
+.locked .triggerLabel {
   color: #7e3042;
+}
+
+@media (max-width: 720px) {
+  .specBar {
+    width: 148px;
+  }
+
+  .triggerMeta {
+    display: none;
+  }
+
+  .sheet {
+    width: calc(100vw - 28px);
+  }
 }
