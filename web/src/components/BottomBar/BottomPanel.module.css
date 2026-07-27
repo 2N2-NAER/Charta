@@ -58,6 +58,14 @@
   flex-direction: column;
 }
 
+.utilityRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 8px;
+  flex-shrink: 0;
+}
+
 .designProgress {
   flex-shrink: 0;
   padding: 10px 14px 11px;
