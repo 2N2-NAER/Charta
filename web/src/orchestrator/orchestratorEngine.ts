@@ -2,6 +2,9 @@ import type OpenAI from 'openai'
 import type { SubagentSpec, SkillSpec, ToolResult, DispatchResult, SchedulerState, ExecutionEvent, ExecutionEventCallback, ConversationTurn, AssetFileInfo, TurnStopReason } from '../types'
 import type { ProductProfile, ProductKind } from '../types/product'
 import { PRODUCT_PROFILES, WRITER_IDS, renderProductProfileXml } from '../types/product'
+import type { CreationSpec, StructureQuota } from '../types/creationSpec'
+import { getDefaultCreationSpec } from '../types/creationSpec'
+import { buildStructureQuota, renderStructureQuotaBody, renderStructureQuotaXml } from './structureQuota'
 import {
   getSubagent,
   getAvailableSubagents,
@@ -363,6 +366,8 @@ export class OrchestratorEngine {
    * 选定后不可在项目内切换；如需其他产品方向，应新建项目。
    */
   private profileLock: ProductProfile | null = null
+  private creationSpecLock: CreationSpec | null = null
+  private structureQuotaLock: StructureQuota | null = null
 
   constructor(llm: LLMClient, fileManager: FileManager) {
     this.llm = llm
@@ -376,12 +381,26 @@ export class OrchestratorEngine {
    * 必须在任何 sendMessage 之前调用——设计区/成文区的结构参数全部自此派生。
    */
   lockProfile(kind: ProductKind): void {
-    this.profileLock = PRODUCT_PROFILES[kind]
+    this.lockCreationSpec(getDefaultCreationSpec(kind))
+  }
+
+  lockCreationSpec(spec: CreationSpec): void {
+    this.profileLock = PRODUCT_PROFILES[spec.productKind]
+    this.creationSpecLock = spec
+    this.structureQuotaLock = buildStructureQuota(spec)
   }
 
   /** 查询当前产品档案（UI 展示 / 注入判定用）*/
   getProfile(): ProductProfile | null {
     return this.profileLock
+  }
+
+  getCreationSpec(): CreationSpec | null {
+    return this.creationSpecLock
+  }
+
+  getStructureQuota(): StructureQuota | null {
+    return this.structureQuotaLock
   }
 
   /**
@@ -446,7 +465,7 @@ export class OrchestratorEngine {
       })
       return {
         success: false,
-        error: `${subagent.name} 暂不可用，请引导用户先在顶部选择产品方向（小说/剧本/长剧/短剧）`,
+        error: `${subagent.name} 暂不可用，请引导用户先选择创作规格（电影/小说/长剧/短剧）`,
         skillName: subagent.name,
       }
     }
@@ -556,6 +575,9 @@ export class OrchestratorEngine {
       //   Guard-0 已保证此处 profileLock 必非 null。
       context = appendExtraLabels(context, [
         { label: 'product_profile', content: renderProductProfileXml(this.profileLock) },
+        this.structureQuotaLock
+          ? { label: 'structure_quota', content: renderStructureQuotaBody(this.structureQuotaLock) }
+          : { label: 'structure_quota', content: undefined },
       ])
     }
 
@@ -869,11 +891,11 @@ export class OrchestratorEngine {
             toolName: subagent.name,
             skillId: primarySkill.skillId,
             skillName: primarySkill.name,
-            message: `[${target}] 缺少产品剧本，先自动生成剧本`,
+            message: `[${target}] 缺少产品正文，先自动生成正文`,
           })
           const scriptResult = await this.runSubagentWithIsolatedContext(
             subagent,
-            '根据叙事结构生成当前产品的专业剧本；只输出产品主剧本，不输出二级拍摄稿。',
+            '根据叙事结构生成当前产品正文；只输出产品主正文，不输出二级拍摄稿。',
             target,
             true,
           )
@@ -920,6 +942,7 @@ export class OrchestratorEngine {
       JSON.stringify(skillIndex, null, 2),
       '</skill_index>',
       this.profileLock ? `\n<product_profile>\n${renderProductProfileXml(this.profileLock)}\n</product_profile>` : '',
+      this.structureQuotaLock ? `\n${renderStructureQuotaXml(this.structureQuotaLock)}` : '',
     ].filter(Boolean).join('\n')
 
     // v7.3：质检 subagent 的结构合法性维度先跑机械扫描，注入 <structural_scan_result>
