@@ -71,14 +71,16 @@ export function BottomPanel() {
         <ChatHistory messages={messages} />
       </div>
 
-      {/* v9.5：创作规格入口（产品类型 + 篇幅规模） */}
-      <CreationSpecBar />
+      <div className={styles.utilityRow}>
+        {/* v9.5：创作规格入口（产品类型 + 篇幅规模） */}
+        <CreationSpecBar />
 
-      {/* 文件导入 */}
-      <FileImporter
-        onFileImport={handleFileImport}
-        disabled={chatProcessing}
-      />
+        {/* 文件导入 */}
+        <FileImporter
+          onFileImport={handleFileImport}
+          disabled={chatProcessing}
+        />
+      </div>
 
       {/* 输入框（固定底部） */}
       <div className={styles.controlsRow}>
