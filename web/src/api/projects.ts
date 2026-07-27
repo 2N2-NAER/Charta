@@ -1,5 +1,6 @@
 import { apiFetch } from './client'
 import type { ProductKind } from '../types/product'
+import type { CreationSpec } from '../types/creationSpec'
 import type { StoryPhase } from '../store/phaseStore'
 
 export interface ProjectMeta {
@@ -7,6 +8,7 @@ export interface ProjectMeta {
   name: string
   description?: string
   productKind?: ProductKind
+  creationSpec?: CreationSpec
   phase?: StoryPhase
   createdAt: string
   updatedAt: string
@@ -17,6 +19,7 @@ export interface ProjectPatch {
   description?: string
   /** null 表示项目尚未选择产品方向（用于新项目与旧数据迁移） */
   productKind?: ProductKind | null
+  creationSpec?: CreationSpec | null
   phase?: StoryPhase
 }
 
