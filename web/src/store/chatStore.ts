@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type { ChatMessage, ExecutionEvent, ConversationTurn } from '../types'
 import type { ProductKind } from '../types/product'
+import type { CreationSpec, StructureQuota } from '../types/creationSpec'
+import { getDefaultCreationSpec } from '../types/creationSpec'
 import type { OrchestratorEngine } from '../orchestrator/orchestratorEngine'
 import { useAssetStore } from './assetStore'
 import { usePhaseStore } from './phaseStore'
@@ -28,6 +30,8 @@ interface ChatStore {
   isLogExpanded: boolean
   /** v6.6：当前锁定的产品方向（null=未选产品，UI 须先引导选择）*/
   product: ProductKind | null
+  creationSpec: CreationSpec | null
+  structureQuota: StructureQuota | null
 
   init: (engine: OrchestratorEngine, projectId: string | null) => Promise<void>
   sendMessage: (content: string) => Promise<void>
@@ -37,6 +41,7 @@ interface ChatStore {
   clearExecutionLog: () => void
   /** UI 产品选择器落定项目产品档案；选定后不可在项目内切换。 */
   setProduct: (kind: ProductKind) => void
+  setCreationSpec: (spec: CreationSpec) => void
   /** v6.6：投喂文件落到 _input_raw.md（input_normalizer 生产端）*/
   appendInputRaw: (filename: string, content: string) => Promise<void>
 }
@@ -128,6 +133,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   executionTurnId: null,
   isLogExpanded: false,
   product: null,
+  creationSpec: null,
+  structureQuota: null,
 
   init: async (engine: OrchestratorEngine, projectId: string | null) => {
     _engine = engine
@@ -141,6 +148,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       isLogExpanded: false,
       isProcessing: false,
       product: engine.getProfile()?.kind ?? null,
+      creationSpec: engine.getCreationSpec(),
+      structureQuota: engine.getStructureQuota(),
     })
     // 拉历史对话（仅持久化模式；events 按 turnId 回填到对应轮次）
     if (_projectId) {
@@ -258,12 +267,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         persistMessage(fallbackMsg)
       }
       const product = _engine?.getProfile()?.kind ?? null
+      const creationSpec = _engine?.getCreationSpec() ?? null
+      const structureQuota = _engine?.getStructureQuota() ?? null
       const phase = usePhaseStore.getState().phase
-      set({ isProcessing: false, product })
+      set({ isProcessing: false, product, creationSpec, structureQuota })
       // v7.4：持久化当前项目的产品方向与创作阶段，供切换项目或重启后恢复。
       if (_projectId) {
         try {
-          await updateProject(_projectId, { productKind: product, phase })
+          await updateProject(_projectId, { productKind: product, creationSpec, phase })
         } catch (e) {
           console.error('[chatStore] 持久化项目运行状态失败', e)
         }
@@ -303,14 +314,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   setProduct: (kind: ProductKind) => {
+    get().setCreationSpec(getDefaultCreationSpec(kind))
+  },
+
+  setCreationSpec: (spec: CreationSpec) => {
     if (!_engine) return
     // 产品方向按项目锁定；需要其他方向时新建项目。
     if (_engine.getProfile() !== null) return
-    _engine.lockProfile(kind)
-    set({ product: kind })
+    _engine.lockCreationSpec(spec)
+    set({
+      product: spec.productKind,
+      creationSpec: spec,
+      structureQuota: _engine.getStructureQuota(),
+    })
     if (_projectId) {
-      void updateProject(_projectId, { productKind: kind }).catch((e) =>
-        console.error('[chatStore] 持久化产品方向失败', e),
+      void updateProject(_projectId, { productKind: spec.productKind, creationSpec: spec }).catch((e) =>
+        console.error('[chatStore] 持久化创作规格失败', e),
       )
     }
   },
