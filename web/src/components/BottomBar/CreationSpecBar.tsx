@@ -78,6 +78,7 @@ export function CreationSpecBar() {
   const locked = product !== null
   const effectiveSpec = creationSpec ?? draftSpec
   const quota = useMemo(() => buildStructureQuota(effectiveSpec), [effectiveSpec])
+  const quotaSummary = `${quota.acts}幕 / ${quota.sequences}单元 / ${quota.scenes}场`
 
   useEffect(() => {
     if (creationSpec) {
@@ -105,10 +106,14 @@ export function CreationSpecBar() {
         className={styles.trigger}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        title={locked ? '查看已锁定的创作规格' : '设置创作规格'}
       >
-        <span className={styles.triggerLabel}>{locked ? '规格已锁定' : '创作规格'}</span>
-        <span className={styles.triggerValue}>{formatCreationSpecLabel(effectiveSpec)}</span>
-        <span className={styles.chevron}>{open ? '收起' : '上拉'}</span>
+        <span className={styles.ticket}>
+          <span className={styles.triggerLabel}>{locked ? '已锁定' : '规格'}</span>
+          <span className={styles.triggerValue}>{formatCreationSpecLabel(effectiveSpec)}</span>
+          <span className={styles.triggerMeta}>{quotaSummary}</span>
+        </span>
+        <span className={styles.chevron} aria-hidden="true" data-open={open ? 'true' : 'false'} />
       </button>
 
       {open && (
