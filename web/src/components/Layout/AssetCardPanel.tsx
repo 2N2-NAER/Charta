@@ -38,7 +38,7 @@ interface GroupedCards {
 // ===== 聚合常量 =====
 
 /** 进入折叠视图的分组名（其余组保持平铺） */
-const COLLAPSIBLE_GROUPS = new Set(['细纲', '剧本'])
+const COLLAPSIBLE_GROUPS = new Set(['细纲', '正文'])
 
 /** 子项数量 ≤ 此值时降级为平铺（不折叠） */
 const COLLAPSE_MIN_COUNT = 2
@@ -303,9 +303,9 @@ export function AssetCardPanel({
   // v6.4：phase 切换时联动折叠状态
   useEffect(() => {
     if (prevPhaseRef.current === 'designing' && phase === 'writing') {
-      // 进入写作期：折叠所有非「剧本」组，展开「剧本」
+      // 进入写作期：折叠所有非「正文」组，展开「正文」
       for (const { group } of sections) {
-        if (group === '剧本') {
+        if (group === '正文') {
           setSectionCollapsed(group, false)
         } else {
           setSectionCollapsed(group, true)
@@ -335,10 +335,10 @@ export function AssetCardPanel({
     )
   }
 
-  // v6.4：写作期分组——「剧本」单独放，其余全部收入「大纲设计」父级
+  // v6.4：写作期分组——「正文」单独放，其余全部收入「大纲设计」父级
   const isWriting = phase === 'writing'
-  const bodySections = sections.filter(({ group }) => group === '剧本')
-  const designSections = sections.filter(({ group }) => group !== '剧本')
+  const bodySections = sections.filter(({ group }) => group === '正文')
+  const designSections = sections.filter(({ group }) => group !== '正文')
 
   // 设计期渲染：所有组独立折叠
   if (!isWriting) {
@@ -377,7 +377,7 @@ export function AssetCardPanel({
     )
   }
 
-  // 写作期渲染：「大纲设计」父级折叠 + 「剧本」独立折叠
+  // 写作期渲染：「大纲设计」父级折叠 + 「正文」独立折叠
   const designParentExpanded = collapsedSections[PARENT_DESIGN_GROUP] === false
   const allDesignCards = designSections.flatMap(({ cards: c }) => c)
   const designParentStatus = aggregate(allDesignCards)
@@ -441,7 +441,7 @@ export function AssetCardPanel({
           )}
         </div>
 
-        {/* 剧本正文 */}
+        {/* 正文 */}
         {bodySections.map(({ group, cards: sectionCards }) =>
           COLLAPSIBLE_GROUPS.has(group) ? (
             <CollapsibleSection
@@ -452,7 +452,7 @@ export function AssetCardPanel({
               onSelect={onSelect}
               expanded={collapsedSections[group] === false ? true : collapsedSections[group] === true ? false : undefined}
               onToggle={() => toggleSection(group)}
-              forceCollapse={sectionCards.length > 0} // 写作期「剧本」始终套折叠壳
+              forceCollapse={sectionCards.length > 0} // 写作期「正文」始终套折叠壳
             />
           ) : (
             <div key={group} className={styles.section}>
