@@ -3,6 +3,10 @@ import type { AssetCardData, AssetStatus } from '../types'
 import type { FileManager } from '../orchestrator/fileManager'
 import { SUBAGENT_REGISTRY, SKILLS_BY_SUBAGENT } from '../skills/skillLoader'
 import { usePhaseStore } from './phaseStore'
+import {
+  applyAssetDisplay,
+  isWritingAsset,
+} from '../utils/assetDisplay'
 
 // ===== 文件→分组 查找表（从 Subagent × Skill 构建） =====
 
@@ -23,38 +27,6 @@ function buildAssetMeta(): Record<string, { group: string }> {
 
 const ASSET_META = buildAssetMeta()
 
-const PRIMARY_WRITING_DIRS = [
-  'novel_chapters/',
-  'short_drama_scripts/',
-  'long_drama_scripts/',
-  'film_scripts/',
-  'chapters/',
-]
-
-function startsWithAny(path: string, prefixes: string[]): boolean {
-  return prefixes.some((prefix) => path.startsWith(prefix))
-}
-
-function isPrimaryWritingAsset(path: string): boolean {
-  return startsWithAny(path, PRIMARY_WRITING_DIRS)
-}
-
-function isWritingAsset(path: string): boolean {
-  return isPrimaryWritingAsset(path) || path.startsWith('video_scripts/')
-}
-
-// ===== 文件名 → 中文展示名 映射 =====
-
-const FILE_LABELS: Record<string, string> = {
-  'worldbuilding.md': '世界观',
-  'characters.md': '角色',
-  'act_map.md': '幕结构',
-  'sequence_list.md': '序列清单',
-  'foreshadowing.md': '伏笔',
-  'subplots.md': '支线',
-  'user_requirements.md': '需求清单',
-}
-
 // ===== 内部状态 =====
 
 interface AssetState {
@@ -64,59 +36,6 @@ interface AssetState {
   previousContent?: string
   /** v6.4：中文字数缓存（仅 chapters/* 计算） */
   wordCount?: number
-}
-
-/**
- * v6.3: 文件名 → 展示标签的解析规则
- * - 先查静态 FILE_LABELS
- * - sequences/S1-1.md → "场记 S1-1"（v7.1）
- * - novel_chapters/S1-1.md → "小说章节 S1-1"
- * - short_drama_scripts/E01-E12.md → "短剧剧本 第1-12集"
- * - video_scripts/short_drama/E01-E12.md → "短剧视频脚本 第1-12集"
- * - chapters/E01-E12.md → "旧正文 第1-12集"（历史兼容）
- * - 其余回退到去 .md 后缀
- */
-function computeLabel(path: string): string {
-  if (FILE_LABELS[path]) return FILE_LABELS[path]
-  const seqMatch = path.match(/^sequences\/(.+)\.md$/)
-  if (seqMatch) return `序列 ${seqMatch[1]}`
-  const sceneMatch = path.match(/^scenes\/(.+)\.md$/)
-  if (sceneMatch) return `场景 ${sceneMatch[1]}`
-  const beatMatch = path.match(/^beats\/(.+)\.md$/)
-  if (beatMatch) return `节拍 ${beatMatch[1]}`
-  const outlineMatch = path.match(/^sequence_outlines\/(.+)\.md$/)
-  if (outlineMatch) return `序列细纲 ${outlineMatch[1]}`
-  const novelMatch = path.match(/^novel_chapters\/(.+)\.md$/)
-  if (novelMatch) return `小说章节 ${formatWritingAssetId(novelMatch[1])}`
-  const shortDramaMatch = path.match(/^short_drama_scripts\/(.+)\.md$/)
-  if (shortDramaMatch) return `短剧剧本 ${formatWritingAssetId(shortDramaMatch[1])}`
-  const longDramaMatch = path.match(/^long_drama_scripts\/(.+)\.md$/)
-  if (longDramaMatch) return `长剧剧本 ${formatWritingAssetId(longDramaMatch[1])}`
-  const filmMatch = path.match(/^film_scripts\/(.+)\.md$/)
-  if (filmMatch) return `电影剧本 ${formatWritingAssetId(filmMatch[1])}`
-  const videoMatch = path.match(/^video_scripts\/([^/]+)\/(.+)\.md$/)
-  if (videoMatch) {
-    const productLabel =
-      videoMatch[1] === 'short_drama'
-        ? '短剧'
-        : videoMatch[1] === 'long_drama'
-          ? '长剧'
-          : '电影'
-    return `${productLabel}视频脚本 ${formatWritingAssetId(videoMatch[2])}`
-  }
-  const chMatch = path.match(/^chapters\/(.+)\.md$/)
-  if (chMatch) {
-    return `旧正文 ${formatWritingAssetId(chMatch[1])}`
-  }
-  return path.replace(/\.md$/, '')
-}
-
-function formatWritingAssetId(name: string): string {
-  const range = name.match(/^E(\d+)-E(\d+)$/)
-  if (range) return `第${Number(range[1])}-${Number(range[2])}集`
-  const single = name.match(/^E(\d+)$/)
-  if (single) return `第${Number(single[1])}集`
-  return name
 }
 
 // ===== Store 类型 =====
@@ -287,19 +206,18 @@ export const useAssetStore = create<AssetStore>((set, get) => ({
           : path.startsWith('sequence_outlines/')
             ? '序列细纲合并稿'
             : isWritingAsset(path)
-              ? '剧本'
+              ? '正文'
               : ''
+      const display = applyAssetDisplay({ path }, meta?.group ?? fallbackGroup)
       return {
         path,
-        filename: computeLabel(path),
-        group: meta?.group ?? fallbackGroup,
+        filename: display.filename,
+        group: display.group,
         status: state.status,
         // v6.4 扩展
         locked: phaseStore.isLockedPath(path),
         wordCount: state.wordCount,
-        metaInfo: isWritingAsset(path)
-          ? path.replace(/^[^/]+\//, '').replace(/\.md$/, '')
-          : undefined,
+        metaInfo: display.metaInfo,
       }
     })
   },
