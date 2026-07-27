@@ -41,7 +41,7 @@ export interface ValidationSet {
 
 export interface ProductProfile {
   kind: ProductKind
-  displayName: string // "小说" / "剧本" / "长剧脚本" / "短剧脚本"
+  displayName: string // "小说" / "电影" / "长剧" / "短剧"
 
   // === 四层语义 + 量级 ===
   act: LayerSpec // 幕
@@ -95,7 +95,7 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
   },
 
   screenplay: {
-    kind: 'screenplay', displayName: '剧本',
+    kind: 'screenplay', displayName: '电影',
     act:      { semantic: '幕(经典三幕)', countRange: [3, 5] },
     sequence: { semantic: '序列',        countRange: [2, 6] },
     scene:    { semantic: '场',          countRange: [3, 8] },
@@ -111,7 +111,7 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
   },
 
   long_drama: {
-    kind: 'long_drama', displayName: '长剧脚本',
+    kind: 'long_drama', displayName: '长剧',
     act:      { semantic: '叙事大阶段', countRange: [3, 8] },
     sequence: { semantic: '集',        countRange: [2, 8], note: '一序列=一集' },
     scene:    { semantic: '场景',      countRange: [5, 10] },  // 一集 5-10 场景
@@ -127,7 +127,7 @@ export const PRODUCT_PROFILES: Record<ProductKind, ProductProfile> = {
   },
 
   short_drama: {
-    kind: 'short_drama', displayName: '短剧脚本',
+    kind: 'short_drama', displayName: '短剧',
     act:      { semantic: '全剧大阶段', countRange: [3, 5] },
     sequence: { semantic: '多集弧',     countRange: [1, 1], note: '每幕恰含 1 序列' },
     scene:    { semantic: '集(一集一场景)', countRange: [8, 15] }, // 每序列 8-15 集
